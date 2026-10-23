@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -96,6 +96,19 @@ CREATE TABLE IF NOT EXISTS actions (
   undone_at TEXT
 );
 CREATE INDEX IF NOT EXISTS actions_by_batch ON actions(batch_id);
+
+-- Sender-level questions for the owner, e.g. "you once wrote to this
+-- newsletter; keep it protected?". Pending items keep the safe default.
+CREATE TABLE IF NOT EXISTS sender_reviews (
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  address TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('protection')),
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  resolution TEXT CHECK (resolution IN ('keep', 'unprotect')),
+  resolved_at TEXT,
+  PRIMARY KEY (account_id, address, kind)
+);
 """
 
 
@@ -119,4 +132,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         connection.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
     elif row["version"] > SCHEMA_VERSION:
         raise RuntimeError("Database was created by a newer email-cleaner; upgrade the code first.")
+    elif row["version"] < SCHEMA_VERSION:
+        # Every change so far only adds tables, which SCHEMA creates above.
+        connection.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
     connection.commit()

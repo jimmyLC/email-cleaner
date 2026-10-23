@@ -51,6 +51,15 @@ class SchemaTests(unittest.TestCase):
             self.conn.execute("INSERT INTO actions (batch_id, account_id, action, actor) "
                               "VALUES ('b1', 'acct', 'trash', 'stranger')")
 
+    def test_old_schema_is_upgraded_in_place(self):
+        self.conn.execute("DROP TABLE sender_reviews")
+        self.conn.execute("UPDATE schema_version SET version = 1")
+        self.conn.commit()
+        self.conn.close()
+        self.conn = db.connect(self.path)
+        self.assertEqual(self.conn.execute("SELECT version FROM schema_version").fetchone()[0], db.SCHEMA_VERSION)
+        self.conn.execute("SELECT count(*) FROM sender_reviews")
+
     def test_newer_schema_is_refused(self):
         self.conn.execute("UPDATE schema_version SET version = 999")
         self.conn.commit()

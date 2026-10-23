@@ -80,10 +80,17 @@ def sync(conn: sqlite3.Connection, provider: Provider, full: bool = False,
 
 
 def protection_reason(conn: sqlite3.Connection, account_id: str, address: str) -> str | None:
-    """Why mail from this address is protected, or None. Deterministic, no AI."""
+    """Why mail from this address is protected, or None. Deterministic, no AI.
+
+    The owner's "unprotect" decision cancels sent/contact evidence for that one
+    address. A client domain still protects, because the owner listed it.
+    """
     address = address.casefold()
     sources = {row[0] for row in conn.execute(
         "SELECT source FROM known_correspondents WHERE account_id = ? AND address = ?", (account_id, address))}
+    if conn.execute("""SELECT 1 FROM sender_reviews WHERE account_id = ? AND address = ?
+                       AND kind = 'protection' AND resolution = 'unprotect'""", (account_id, address)).fetchone():
+        sources = set()
     if "sent" in sources:
         return "曾寄信給對方"
     if "contact" in sources:
@@ -91,6 +98,61 @@ def protection_reason(conn: sqlite3.Connection, account_id: str, address: str) -
     if address and conn.execute("SELECT 1 FROM client_domains WHERE domain = ?", (domain_of(address),)).fetchone():
         return "客戶網域"
     return None
+
+
+def flag_protection_reviews(conn: sqlite3.Connection, account_id: str, min_bulk_ratio: float = 0.8) -> int:
+    """Queue senders protected by sent mail whose inbox mail looks like a newsletter.
+
+    Replying once to a newsletter makes it look like a client. These stay
+    protected until the owner decides; nothing is unprotected automatically.
+    """
+    rows = conn.execute(
+        """SELECT m.sender_address, count(*) AS total,
+                  avg(json_array_length(m.signals, '$.bulk') > 0) AS bulk
+           FROM messages m
+           JOIN known_correspondents k ON k.account_id = m.account_id AND k.address = m.sender_address
+                AND k.source = 'sent'
+           WHERE m.account_id = ? AND m.folder = 'inbox'
+           GROUP BY m.sender_address HAVING bulk >= ?""",
+        (account_id, min_bulk_ratio)).fetchall()
+    added = 0
+    for row in rows:
+        reason = f"曾寄信給對方，但 {row['bulk']:.0%} 的來信有群發佐證（共 {row['total']} 封）"
+        added += conn.execute(
+            """INSERT OR IGNORE INTO sender_reviews (account_id, address, kind, reason)
+               VALUES (?, ?, 'protection', ?)""", (account_id, row["sender_address"], reason)).rowcount
+    conn.commit()
+    return added
+
+
+def pending_protection_reviews(conn: sqlite3.Connection, account_id: str) -> list[dict]:
+    rows = conn.execute(
+        """SELECT r.address, r.reason, count(m.message_id) AS total
+           FROM sender_reviews r LEFT JOIN messages m
+             ON m.account_id = r.account_id AND m.sender_address = r.address AND m.folder = 'inbox'
+           WHERE r.account_id = ? AND r.kind = 'protection' AND r.resolution IS NULL
+           GROUP BY r.address ORDER BY total DESC, r.address""", (account_id,)).fetchall()
+    result = []
+    for row in rows:
+        subjects = [r[0] for r in conn.execute(
+            """SELECT subject FROM messages WHERE account_id = ? AND folder = 'inbox' AND sender_address = ?
+               GROUP BY subject ORDER BY max(received_at) DESC LIMIT 3""", (account_id, row["address"]))]
+        result.append({"address": row["address"], "reason": row["reason"], "total": row["total"],
+                       "sample_subjects": subjects})
+    return result
+
+
+def resolve_protection_review(conn: sqlite3.Connection, account_id: str, address: str, resolution: str) -> None:
+    """Record the owner's decision. Only the owner's CLI/UI may call this, never MCP."""
+    if resolution not in ("keep", "unprotect"):
+        raise ValueError("resolution must be keep or unprotect")
+    changed = conn.execute(
+        """UPDATE sender_reviews SET resolution = ?, resolved_at = datetime('now')
+           WHERE account_id = ? AND address = ? AND kind = 'protection'""",
+        (resolution, account_id, address.casefold())).rowcount
+    if not changed:
+        raise ValueError("No protection review for that address")
+    conn.commit()
 
 
 def sender_groups(conn: sqlite3.Connection, account_id: str, folder: str = "inbox",

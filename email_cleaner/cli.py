@@ -34,9 +34,13 @@ def cmd_login(args) -> int:
 
 def cmd_sync(args) -> int:
     with db.connect(db_path()) as conn:
-        result = index.sync(conn, outlook_provider(), full=args.full)
+        provider = outlook_provider()
+        result = index.sync(conn, provider, full=args.full)
+        flagged = index.flag_protection_reviews(conn, provider.account_id())
     print(f"Indexed inbox {result.inbox}, sent {result.sent}; "
           f"{result.correspondents} sent-to addresses, {result.contacts} contact addresses. No mail was changed.")
+    if flagged:
+        print(f"{flagged} protected sender(s) look like newsletters; see `protection-review outlook`.")
     return 0
 
 
@@ -58,6 +62,25 @@ def cmd_groups(args) -> int:
         print(f"{number:>3}. {group['total']:>5} 封  {group['sender']}  {flag}{risk}")
         for subject in group["sample_subjects"]:
             print(f"        - {subject}")
+    return 0
+
+
+def cmd_protection_review(args) -> int:
+    with db.connect(db_path()) as conn:
+        account = account_for(conn, args.provider)
+        if args.decision != "list":
+            index.resolve_protection_review(conn, account, args.address, args.decision)
+            print(f"{args.address}: {'維持保護' if args.decision == 'keep' else '解除保護'}")
+            return 0
+        pending = index.pending_protection_reviews(conn, account)
+    if args.json:
+        print(json.dumps(pending, ensure_ascii=False, indent=2))
+        return 0
+    for number, item in enumerate(pending, 1):
+        print(f"{number:>3}. {item['address']}  {item['reason']}")
+        for subject in item["sample_subjects"]:
+            print(f"        - {subject}")
+    print(f"{len(pending)} pending. Decide with: protection-review {args.provider} keep|unprotect ADDRESS")
     return 0
 
 
@@ -96,6 +119,14 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--limit", type=int, default=50)
             sub.add_argument("--json", action="store_true")
 
+    review = commands.add_parser("protection-review",
+                                 help="List or decide protected senders that look like newsletters")
+    review.add_argument("provider", choices=["outlook"])
+    review.add_argument("decision", nargs="?", default="list", choices=["list", "keep", "unprotect"])
+    review.add_argument("address", nargs="?", default="")
+    review.add_argument("--json", action="store_true")
+    review.set_defaults(func=cmd_protection_review)
+
     domains = commands.add_parser("client-domain", help="Manage the client domain list")
     domains.add_argument("action", choices=["add", "remove", "list"])
     domains.add_argument("domain", nargs="?", default="")
@@ -104,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "client-domain" and args.action != "list" and "." not in args.domain:
         parser.error("give a domain such as client.example")
+    if args.command == "protection-review" and args.decision != "list" and "@" not in args.address:
+        parser.error("give the sender address to decide")
     try:
         return args.func(args)
     except Exception as exc:  # noqa: BLE001 - show a short message, not a traceback with mail data

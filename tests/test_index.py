@@ -93,6 +93,41 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(stats["folders"], {"inbox": 5, "sent": 1})
         self.assertEqual(stats["inbox_senders"], 2)
 
+    def test_newsletter_you_once_replied_to_is_queued_not_unprotected(self):
+        bulk = (("List-Unsubscribe", "<https://x>"),)
+        inbox = ([msg(i, sender="member@letter.example", headers=bulk) for i in range(5)]
+                 + [msg(10 + i, sender="boss@client.example") for i in range(3)]
+                 + [msg(20 + i, sender="friend@mail.example", headers=bulk) for i in range(3)])
+        sent = [msg(1, "sent", recipients=("member@letter.example", "boss@client.example", "friend@mail.example"))]
+        index.sync(self.conn, FakeProvider(inbox, sent, contacts=["friend@mail.example"]))
+        # Contacts you also wrote to are queued too; the client you mail is not (no bulk evidence).
+        self.assertEqual(index.flag_protection_reviews(self.conn, "outlook:acct"), 2)
+        self.assertEqual(index.flag_protection_reviews(self.conn, "outlook:acct"), 0)  # idempotent
+        pending = index.pending_protection_reviews(self.conn, "outlook:acct")
+        self.assertEqual([p["address"] for p in pending], ["member@letter.example", "friend@mail.example"])
+        self.assertEqual(pending[0]["total"], 5)
+        reason = lambda a: index.protection_reason(self.conn, "outlook:acct", a)
+        self.assertEqual(reason("member@letter.example"), "曾寄信給對方")  # still protected while pending
+
+        index.resolve_protection_review(self.conn, "outlook:acct", "Member@Letter.Example", "unprotect")
+        self.assertIsNone(reason("member@letter.example"))
+        self.assertEqual([p["address"] for p in index.pending_protection_reviews(self.conn, "outlook:acct")],
+                         ["friend@mail.example"])
+        self.assertEqual(reason("boss@client.example"), "曾寄信給對方")
+
+    def test_client_domain_still_protects_an_unprotected_address(self):
+        bulk = (("List-Unsubscribe", "<https://x>"),)
+        index.sync(self.conn, FakeProvider([msg(1, sender="news@partner.example", headers=bulk)],
+                                           [msg(1, "sent", recipients=("news@partner.example",))]))
+        index.flag_protection_reviews(self.conn, "outlook:acct")
+        index.resolve_protection_review(self.conn, "outlook:acct", "news@partner.example", "unprotect")
+        self.conn.execute("INSERT INTO client_domains (domain) VALUES ('partner.example')")
+        self.assertEqual(index.protection_reason(self.conn, "outlook:acct", "news@partner.example"), "客戶網域")
+        with self.assertRaises(ValueError):
+            index.resolve_protection_review(self.conn, "outlook:acct", "news@partner.example", "delete")
+        with self.assertRaises(ValueError):
+            index.resolve_protection_review(self.conn, "outlook:acct", "nobody@x.example", "keep")
+
 
 if __name__ == "__main__":
     unittest.main()
