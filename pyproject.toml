@@ -1,0 +1,20 @@
+[project]
+name = "email-cleaner"
+version = "0.1.0"
+description = "Personal, self-hosted inbox cleaner for Outlook and Gmail"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+  "msal>=1.30,<2",
+  "requests>=2.32,<3",
+  "python-dotenv>=1,<2",
+  "typesafe-sdk>=0.7",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["email_cleaner"]
