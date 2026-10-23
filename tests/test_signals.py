@@ -26,6 +26,9 @@ class SignalTests(unittest.TestCase):
         self.assertIn("驗證碼", signals.collect(meta(subject="Your verification code"))["protect"])
         self.assertIn("收據／發票", signals.collect(meta(preview="您的電子發票已開立"))["protect"])
         self.assertEqual(signals.collect(meta())["protect"], [])
+        self.assertIn("密碼／帳號存取", signals.collect(meta(subject="重設您的密碼"))["protect"])
+        # Marketing idioms such as 財富密碼 must not lock a newsletter as protected.
+        self.assertEqual(signals.collect(meta(subject="3 檔高股息的財富密碼"))["protect"], [])
 
     def test_authentication_failures_and_impersonation(self):
         result = signals.collect(meta(
@@ -39,6 +42,10 @@ class SignalTests(unittest.TestCase):
         result = signals.collect(meta(
             sender_address="account@microsoft.com", sender_name="Microsoft",
             headers=(("Authentication-Results", "spf=pass; dkim=pass; dmarc=pass"),)))
+        self.assertEqual(result["risk"], [])
+
+    def test_missing_policy_is_not_a_failure(self):
+        result = signals.collect(meta(headers=(("Authentication-Results", "spf=none; dkim=none; dmarc=none"),)))
         self.assertEqual(result["risk"], [])
 
     def test_display_name_with_foreign_address(self):

@@ -26,7 +26,8 @@ _PROTECT_PHRASES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pattern, re.IGNORECASE), label)
     for pattern, label in (
         (r"verification code|one[- ]time (?:pass|code)|\botp\b|驗證碼|認證碼|動態密碼", "驗證碼"),
-        (r"password|passcode|密碼|reset your|重設|重置", "密碼／帳號存取"),
+        (r"reset (?:your )?password|password reset|forgot (?:your )?password|change (?:your )?password|"
+         r"(?:重設|重置|變更|修改|忘記)(?:您的|你的)?密碼|密碼(?:重設|重置|變更|已更改)", "密碼／帳號存取"),
         (r"security alert|suspicious|unusual (?:sign|activity)|安全性?警示|異常登入|登入通知|新裝置登入", "安全通知"),
         (r"\breceipt\b|\binvoice\b|收據|發票|電子發票|請款", "收據／發票"),
         (r"order (?:confirmation|confirmed|#)|訂單(?:確認|成立)|付款(?:成功|完成)|payment (?:received|confirmation)", "訂單／付款"),
@@ -39,7 +40,8 @@ _REPLY_PREFIX = re.compile(r"^\s*(?:re|fw|fwd|回覆|轉寄)\s*[:：]", re.IGNOR
 # Brands often impersonated in a display name while the address is elsewhere.
 _BRANDS = ("microsoft", "outlook", "apple", "icloud", "google", "gmail", "paypal", "amazon",
            "netflix", "dhl", "fedex", "ups", "line", "facebook", "instagram")
-_AUTH_RESULT = re.compile(r"\b(spf|dkim|dmarc)=(fail|softfail|permerror|none)\b", re.IGNORECASE)
+# "none" only means the sender publishes no policy; it is common for legitimate mail.
+_AUTH_RESULT = re.compile(r"\b(spf|dkim|dmarc)=(fail|softfail|permerror)\b", re.IGNORECASE)
 _EMBEDDED_ADDRESS = re.compile(r"[\w.+-]+@([\w-]+(?:\.[\w-]+)+)")
 
 
