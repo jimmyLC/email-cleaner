@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+ALLOWLIST = Path(__file__).resolve().parent / "privacy_allowlist.txt"
 MIN_LENGTH = 6
 FORBIDDEN_PATH = re.compile(
     r"(^|/)(\.env(?!\.example$)[^/]*|data/.*|.*\.sqlite[^/]*|.*\.db|.*token[^/]*|.*credential[^/]*|"
@@ -88,8 +89,18 @@ def private_values(env_paths: list[Path], json_paths: list[Path], db_path: Path)
         if path.is_file():
             values |= json_strings(json.loads(path.read_text(encoding="utf-8")))
     values |= database_values(db_path)
-    # Short or generic strings would match ordinary source text.
-    return {value for value in values if len(value) >= MIN_LENGTH and value.strip()}
+    # Short or generic strings would match ordinary source text. The allowlist
+    # holds reviewed generic phrases (e.g. a common subject line) that are not
+    # private even when they also appear in the owner's mailbox.
+    return {value for value in values
+            if len(value) >= MIN_LENGTH and value.strip() and value not in allowed_values()}
+
+
+def allowed_values() -> set[str]:
+    if not ALLOWLIST.is_file():
+        return set()
+    return {line.rstrip("\n") for line in ALLOWLIST.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")}
 
 
 def scan(refs: list[str], values: set[str]) -> list[str]:

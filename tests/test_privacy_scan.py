@@ -63,6 +63,14 @@ class PrivacyScanTests(unittest.TestCase):
         env.write_text(f"A={SECRET}\nB=\nC=abc\n# D=commented-value\n", encoding="utf-8")
         self.assertEqual(privacy_scan.private_values([env], [], self.root / "missing.sqlite"), {SECRET})
 
+    def test_allowlisted_generic_phrase_is_ignored(self):
+        allow = self.root / "allow.txt"
+        allow.write_text("# comment\nGeneric phrase here\n", encoding="utf-8")
+        env = self.root / "private.env"
+        env.write_text(f"A=Generic phrase here\nB={SECRET}\n", encoding="utf-8")
+        with patch.object(privacy_scan, "ALLOWLIST", allow):
+            self.assertEqual(privacy_scan.private_values([env], [], self.root / "x.sqlite"), {SECRET})
+
 
 if __name__ == "__main__":
     unittest.main()

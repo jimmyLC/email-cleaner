@@ -1,0 +1,3 @@
+# Reviewed generic phrases that may coincide with real mailbox data but are not private.
+# Add a line only after checking it reveals nothing about the owner. One phrase per line.
+Your verification code

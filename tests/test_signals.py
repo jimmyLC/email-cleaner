@@ -23,7 +23,7 @@ class SignalTests(unittest.TestCase):
 
     def test_protect_signals(self):
         self.assertIn("回覆／轉寄串", signals.collect(meta(subject="Re: 報價"))["protect"])
-        self.assertIn("驗證碼", signals.collect(meta(subject="Your verification code"))["protect"])
+        self.assertIn("驗證碼", signals.collect(meta(subject="Example Corp verification code 000000"))["protect"])
         self.assertIn("收據／發票", signals.collect(meta(preview="您的電子發票已開立"))["protect"])
         self.assertEqual(signals.collect(meta())["protect"], [])
         self.assertIn("密碼／帳號存取", signals.collect(meta(subject="重設您的密碼"))["protect"])
