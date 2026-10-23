@@ -1,0 +1,28 @@
+# Credentials, tokens and mailbox data must never be versioned.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*token*
+*credential*
+*secret*
+client_secret*.json
+
+# Local runtime data (rules, index, logs) lives in data/ on the host only.
+data/
+*.sqlite*
+*.db
+*.log
+logs/
+backups/
+exports/
+
+# Tooling
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
