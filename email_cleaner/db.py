@@ -105,7 +105,9 @@ CREATE TABLE IF NOT EXISTS sender_reviews (
   kind TEXT NOT NULL CHECK (kind IN ('protection')),
   reason TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  resolution TEXT CHECK (resolution IN ('keep', 'unprotect')),
+  -- keep: stays a client. unprotect: ordinary sender.
+  -- not_client: not filed as a client, but its mail must never be trashed.
+  resolution TEXT CHECK (resolution IN ('keep', 'unprotect', 'not_client')),
   resolved_at TEXT,
   PRIMARY KEY (account_id, address, kind)
 );

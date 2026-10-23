@@ -69,8 +69,10 @@ def cmd_protection_review(args) -> int:
     with db.connect(db_path()) as conn:
         account = account_for(conn, args.provider)
         if args.decision != "list":
-            index.resolve_protection_review(conn, account, args.address, args.decision)
-            print(f"{args.address}: {'維持保護' if args.decision == 'keep' else '解除保護'}")
+            resolution = args.decision.replace("-", "_")
+            index.resolve_protection_review(conn, account, args.address, resolution)
+            labels = {"keep": "維持保護", "unprotect": "解除保護", "not_client": "不列為客戶，但永不刪除"}
+            print(f"{args.address}: {labels[resolution]}")
             return 0
         pending = index.pending_protection_reviews(conn, account)
     if args.json:
@@ -80,7 +82,7 @@ def cmd_protection_review(args) -> int:
         print(f"{number:>3}. {item['address']}  {item['reason']}")
         for subject in item["sample_subjects"]:
             print(f"        - {subject}")
-    print(f"{len(pending)} pending. Decide with: protection-review {args.provider} keep|unprotect ADDRESS")
+    print(f"{len(pending)} pending. Decide with: protection-review {args.provider} keep|unprotect|not-client ADDRESS")
     return 0
 
 
@@ -122,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     review = commands.add_parser("protection-review",
                                  help="List or decide protected senders that look like newsletters")
     review.add_argument("provider", choices=["outlook"])
-    review.add_argument("decision", nargs="?", default="list", choices=["list", "keep", "unprotect"])
+    review.add_argument("decision", nargs="?", default="list", choices=["list", "keep", "unprotect", "not-client"])
     review.add_argument("address", nargs="?", default="")
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=cmd_protection_review)

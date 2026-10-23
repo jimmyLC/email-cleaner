@@ -115,6 +115,18 @@ class IndexTests(unittest.TestCase):
                          ["friend@mail.example"])
         self.assertEqual(reason("boss@client.example"), "曾寄信給對方")
 
+    def test_not_client_decision_blocks_trash_without_client_filing(self):
+        bulk = (("List-Unsubscribe", "<https://x>"),)
+        index.sync(self.conn, FakeProvider([msg(1, sender="news@letter.example", headers=bulk),
+                                            msg(2, sender="ads@shop.example", headers=bulk)],
+                                           [msg(1, "sent", recipients=("news@letter.example", "ads@shop.example"))]))
+        index.flag_protection_reviews(self.conn, "outlook:acct")
+        index.resolve_protection_review(self.conn, "outlook:acct", "news@letter.example", "not_client")
+        index.resolve_protection_review(self.conn, "outlook:acct", "ads@shop.example", "unprotect")
+        self.assertIsNone(index.protection_reason(self.conn, "outlook:acct", "news@letter.example"))
+        self.assertEqual(index.deletion_guard(self.conn, "outlook:acct", "news@letter.example"), "使用者指定不刪除")
+        self.assertIsNone(index.deletion_guard(self.conn, "outlook:acct", "ads@shop.example"))
+
     def test_client_domain_still_protects_an_unprotected_address(self):
         bulk = (("List-Unsubscribe", "<https://x>"),)
         index.sync(self.conn, FakeProvider([msg(1, sender="news@partner.example", headers=bulk)],

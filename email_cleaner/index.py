@@ -82,14 +82,16 @@ def sync(conn: sqlite3.Connection, provider: Provider, full: bool = False,
 def protection_reason(conn: sqlite3.Connection, account_id: str, address: str) -> str | None:
     """Why mail from this address is protected, or None. Deterministic, no AI.
 
-    The owner's "unprotect" decision cancels sent/contact evidence for that one
-    address. A client domain still protects, because the owner listed it.
+    The owner's "unprotect" or "not_client" decision cancels sent/contact
+    evidence for that one address. A client domain still protects, because the
+    owner listed it.
     """
     address = address.casefold()
     sources = {row[0] for row in conn.execute(
         "SELECT source FROM known_correspondents WHERE account_id = ? AND address = ?", (account_id, address))}
     if conn.execute("""SELECT 1 FROM sender_reviews WHERE account_id = ? AND address = ?
-                       AND kind = 'protection' AND resolution = 'unprotect'""", (account_id, address)).fetchone():
+                       AND kind = 'protection' AND resolution IN ('unprotect', 'not_client')""",
+                    (account_id, address)).fetchone():
         sources = set()
     if "sent" in sources:
         return "曾寄信給對方"
@@ -97,6 +99,22 @@ def protection_reason(conn: sqlite3.Connection, account_id: str, address: str) -
         return "在聯絡人中"
     if address and conn.execute("SELECT 1 FROM client_domains WHERE domain = ?", (domain_of(address),)).fetchone():
         return "客戶網域"
+    return None
+
+
+def deletion_guard(conn: sqlite3.Connection, account_id: str, address: str) -> str | None:
+    """Why mail from this address must never be trashed, or None.
+
+    Covers protected clients and senders the owner marked "not a client, but
+    keep". The executor must check this before every trash action.
+    """
+    reason = protection_reason(conn, account_id, address)
+    if reason:
+        return reason
+    if conn.execute("""SELECT 1 FROM sender_reviews WHERE account_id = ? AND address = ?
+                       AND kind = 'protection' AND resolution = 'not_client'""",
+                    (account_id, address.casefold())).fetchone():
+        return "使用者指定不刪除"
     return None
 
 
@@ -144,8 +162,8 @@ def pending_protection_reviews(conn: sqlite3.Connection, account_id: str) -> lis
 
 def resolve_protection_review(conn: sqlite3.Connection, account_id: str, address: str, resolution: str) -> None:
     """Record the owner's decision. Only the owner's CLI/UI may call this, never MCP."""
-    if resolution not in ("keep", "unprotect"):
-        raise ValueError("resolution must be keep or unprotect")
+    if resolution not in ("keep", "unprotect", "not_client"):
+        raise ValueError("resolution must be keep, unprotect or not_client")
     changed = conn.execute(
         """UPDATE sender_reviews SET resolution = ?, resolved_at = datetime('now')
            WHERE account_id = ? AND address = ? AND kind = 'protection'""",
