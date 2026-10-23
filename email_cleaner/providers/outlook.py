@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any, Callable, Iterator
 from urllib.parse import quote
@@ -170,3 +171,81 @@ class OutlookProvider:
                 address = (entry.get("address") or "").strip().casefold()
                 if address:
                     yield address
+
+
+# --- Writes -----------------------------------------------------------------
+# Separate from the read-only provider. Only two write calls exist: move a
+# message, and create a top-level mail folder. There is no delete or send.
+
+WRITE_SCOPES = ["Mail.ReadWrite", "Contacts.Read", "User.Read"]
+_ALLOWED_POST = re.compile(r"^/me/(?:messages/[^/]+/move|mailFolders)$")
+_RESERVED_FOLDERS = {"inbox", "deleteditems", "junkemail", "sentitems", "drafts", "outbox", "archive"}
+
+
+class OutlookWriter:
+    def __init__(self, auth: OutlookAuth, session: requests.Session | None = None,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
+        self.auth = auth
+        self.session = session or requests.Session()
+        self.sleep = sleep
+        self._folders: dict[str, str] = {}
+        self._account: str | None = None
+
+    def _call(self, method: str, path: str, params: dict[str, str] | None = None,
+              body: dict[str, Any] | None = None) -> dict[str, Any]:
+        if method == "POST" and not _ALLOWED_POST.match(path):
+            raise PermissionError(f"Write call not allowed: {path}")
+        if method not in ("GET", "POST"):
+            raise PermissionError(f"HTTP method not allowed: {method}")
+        for attempt in range(MAX_RETRIES + 1):
+            headers = {"Authorization": f"Bearer {self.auth.token()}", "Accept": "application/json"}
+            if method == "GET":
+                response = self.session.get(GRAPH + path, params=params, timeout=45, headers=headers)
+            else:
+                response = self.session.post(GRAPH + path, json=body, timeout=45, headers=headers)
+            if response.status_code in (429, 503, 504) and attempt < MAX_RETRIES:
+                try:
+                    wait = float(response.headers.get("Retry-After", 2 ** attempt))
+                except ValueError:
+                    wait = 2 ** attempt
+                self.sleep(min(max(wait, 1), MAX_RETRY_AFTER))
+                continue
+            response.raise_for_status()
+            return response.json()
+        raise RuntimeError("Microsoft Graph kept throttling; try again later.")
+
+    def account_id(self) -> str:
+        if self._account is None:
+            self._account = "outlook:" + self._call("GET", "/me", {"$select": "id"})["id"]
+        return self._account
+
+    def get_message(self, message_id: str) -> dict[str, Any]:
+        return self._call("GET", f"/me/messages/{quote(message_id, safe='')}",
+                          {"$select": "id,internetMessageId,subject,from,parentFolderId"})
+
+    def folder_id(self, well_known: str) -> str:
+        if well_known not in self._folders:
+            self._folders[well_known] = self._call("GET", f"/me/mailFolders/{well_known}", {"$select": "id"})["id"]
+        return self._folders[well_known]
+
+    def ensure_folder(self, display_name: str) -> str:
+        """Find or create a top-level folder by display name and return its ID."""
+        key = "name:" + display_name
+        if key in self._folders:
+            return self._folders[key]
+        if not display_name.strip() or display_name.casefold() in _RESERVED_FOLDERS:
+            raise ValueError(f"Not a usable archive folder: {display_name!r}")
+        escaped = display_name.replace("'", "''")
+        found = self._call("GET", "/me/mailFolders",
+                           {"$filter": f"displayName eq '{escaped}'", "$select": "id,displayName"}).get("value", [])
+        folder = found[0] if found else self._call("POST", "/me/mailFolders", body={"displayName": display_name})
+        self._folders[key] = folder["id"]
+        return folder["id"]
+
+    def move(self, message_id: str, destination_id: str) -> str:
+        """Move a message and return its new ID (Graph assigns one on move)."""
+        moved = self._call("POST", f"/me/messages/{quote(message_id, safe='')}/move",
+                           body={"destinationId": destination_id})
+        if not moved.get("id"):
+            raise RuntimeError("Graph did not return the moved message ID")
+        return moved["id"]

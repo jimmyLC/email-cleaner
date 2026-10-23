@@ -1,4 +1,8 @@
-"""Command line entry point. Phase 1 commands only read from the mailbox."""
+"""Command line entry point.
+
+Only `apply` and `undo` change the mailbox, and both go through the executor's
+guards. Everything else reads the mailbox or only the local index.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from email_cleaner import db, index
+from email_cleaner import db, index, policy, rules
 from email_cleaner.config import PROJECT, db_path
 
 
@@ -26,9 +30,9 @@ def account_for(conn, provider_name: str) -> str:
 
 
 def cmd_login(args) -> int:
-    from email_cleaner.providers.outlook import OutlookAuth
-    OutlookAuth().device_login()
-    print("Outlook sign-in complete (read-only scopes).")
+    from email_cleaner.providers.outlook import WRITE_SCOPES, OutlookAuth
+    OutlookAuth(scopes=WRITE_SCOPES if args.write else None).device_login()
+    print("Outlook sign-in complete " + ("(can move mail)." if args.write else "(read-only scopes)."))
     return 0
 
 
@@ -86,6 +90,68 @@ def cmd_protection_review(args) -> int:
     return 0
 
 
+def cmd_rule(args) -> int:
+    with db.connect(db_path()) as conn:
+        if args.rule_command == "add":
+            rule_id = rules.add_rule(conn, args.scope, args.sender, args.action, "user",
+                                     subject_keyword=args.keyword, target_folder=args.folder)
+            print(f"Added rule #{rule_id}")
+        elif args.rule_command in ("disable", "enable"):
+            rules.set_status(conn, args.id, "disabled" if args.rule_command == "disable" else "active")
+            print(f"Rule #{args.id} {args.rule_command}d")
+        for row in conn.execute("SELECT * FROM rules ORDER BY id"):
+            keyword = f" 主旨含「{row['subject_keyword']}」" if row["subject_keyword"] else ""
+            folder = f" → {row['target_folder']}" if row["target_folder"] else ""
+            print(f"#{row['id']:<4} {row['status']:<8} {row['scope']:<14} {row['sender']}{keyword}  "
+                  f"{row['action']}{folder}  ({row['origin']})")
+    return 0
+
+
+def _plan(conn, args):
+    account = account_for(conn, args.provider)
+    senders = args.sender or (policy.top_senders(conn, account, args.groups) if args.groups else None)
+    return account, policy.build_plan(conn, account, senders)
+
+
+def cmd_plan(args) -> int:
+    with db.connect(db_path()) as conn:
+        _, plan = _plan(conn, args)
+    if args.json:
+        print(json.dumps(policy.to_json(plan), ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(policy.summarize(plan), ensure_ascii=False, indent=2))
+        print("Preview only; no mail was changed.")
+    return 0
+
+
+def cmd_apply(args) -> int:
+    from email_cleaner.executor import Executor
+    from email_cleaner.providers.outlook import WRITE_SCOPES, OutlookAuth, OutlookWriter
+    with db.connect(db_path()) as conn:
+        account, plan = _plan(conn, args)
+        summary = policy.summarize(plan)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        if not args.yes:
+            print("Preview only. Re-run with --yes to move these messages (archive or Deleted Items only).")
+            return 0
+        writer = OutlookWriter(OutlookAuth(scopes=WRITE_SCOPES))
+        result = Executor(conn, writer, account, actor="user").execute(plan)
+    print(f"Batch {result.batch_id}: moved {result.moved}, skipped {result.skipped}, "
+          f"blocked {result.blocked}, failed {result.failed}. Undo with: undo outlook {result.batch_id}")
+    return 0 if result.failed == 0 else 1
+
+
+def cmd_undo(args) -> int:
+    from email_cleaner.executor import Executor
+    from email_cleaner.providers.outlook import WRITE_SCOPES, OutlookAuth, OutlookWriter
+    with db.connect(db_path()) as conn:
+        account = account_for(conn, args.provider)
+        writer = OutlookWriter(OutlookAuth(scopes=WRITE_SCOPES))
+        result = Executor(conn, writer, account, actor="user").undo(args.batch)
+    print(f"Batch {args.batch}: restored {result.moved}, already in Inbox {result.skipped}, failed {result.failed}.")
+    return 0 if result.failed == 0 else 1
+
+
 def cmd_client_domain(args) -> int:
     with db.connect(db_path()) as conn:
         if args.action == "add":
@@ -100,11 +166,12 @@ def cmd_client_domain(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     load_dotenv(PROJECT / ".env", override=False)
-    parser = argparse.ArgumentParser(prog="email-cleaner", description="Personal inbox cleaner (read-only phase)")
+    parser = argparse.ArgumentParser(prog="email-cleaner", description="Personal inbox cleaner")
     commands = parser.add_subparsers(dest="command", required=True)
 
     login = commands.add_parser("login", help="Sign in to a mailbox in this terminal")
     login.add_argument("provider", choices=["outlook"])
+    login.add_argument("--write", action="store_true", help="also grant permission to move mail")
     login.set_defaults(func=cmd_login)
 
     sync = commands.add_parser("sync", help="Index Inbox and Sent Items metadata (read-only)")
@@ -128,6 +195,37 @@ def main(argv: list[str] | None = None) -> int:
     review.add_argument("address", nargs="?", default="")
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=cmd_protection_review)
+
+    rule = commands.add_parser("rule", help="List, add, enable or disable cleanup rules")
+    rule_commands = rule.add_subparsers(dest="rule_command")
+    rule_commands.add_parser("list")
+    add = rule_commands.add_parser("add")
+    add.add_argument("--scope", required=True, choices=["address", "domain", "domain_subject"])
+    add.add_argument("--sender", required=True, help="address, or domain for domain scopes")
+    add.add_argument("--keyword", help="subject keyword for domain_subject")
+    add.add_argument("--action", required=True, choices=["archive", "trash"])
+    add.add_argument("--folder", help="target folder for archive")
+    for name in ("disable", "enable"):
+        toggle = rule_commands.add_parser(name)
+        toggle.add_argument("id", type=int)
+    rule.set_defaults(func=cmd_rule, rule_command="list")
+
+    for name, func, text in (("plan", cmd_plan, "Preview what would happen (no changes)"),
+                             ("apply", cmd_apply, "Carry out the plan; needs --yes"),):
+        sub = commands.add_parser(name, help=text)
+        sub.add_argument("provider", choices=["outlook"])
+        sub.add_argument("--groups", type=int, default=0, help="limit to the N largest sender groups")
+        sub.add_argument("--sender", action="append", help="limit to this sender (repeatable)")
+        sub.set_defaults(func=func)
+        if name == "plan":
+            sub.add_argument("--json", action="store_true")
+        else:
+            sub.add_argument("--yes", action="store_true")
+
+    undo = commands.add_parser("undo", help="Move a batch's messages back to the Inbox")
+    undo.add_argument("provider", choices=["outlook"])
+    undo.add_argument("batch")
+    undo.set_defaults(func=cmd_undo)
 
     domains = commands.add_parser("client-domain", help="Manage the client domain list")
     domains.add_argument("action", choices=["add", "remove", "list"])

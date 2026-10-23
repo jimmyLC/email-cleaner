@@ -60,6 +60,15 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT version FROM schema_version").fetchone()[0], db.SCHEMA_VERSION)
         self.conn.execute("SELECT count(*) FROM sender_reviews")
 
+    def test_v2_store_gains_new_message_id_column(self):
+        self.conn.execute("ALTER TABLE actions DROP COLUMN new_message_id")
+        self.conn.execute("UPDATE schema_version SET version = 2")
+        self.conn.commit()
+        self.conn.close()
+        self.conn = db.connect(self.path)
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(actions)")}
+        self.assertIn("new_message_id", columns)
+
     def test_newer_schema_is_refused(self):
         self.conn.execute("UPDATE schema_version SET version = 999")
         self.conn.commit()

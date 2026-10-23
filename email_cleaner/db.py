@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -93,7 +93,9 @@ CREATE TABLE IF NOT EXISTS actions (
   actor TEXT NOT NULL CHECK (actor IN ('user', 'schedule', 'mcp')),
   detail TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  undone_at TEXT
+  undone_at TEXT,
+  -- Graph gives a moved message a new ID; undo needs it.
+  new_message_id TEXT
 );
 CREATE INDEX IF NOT EXISTS actions_by_batch ON actions(batch_id);
 
@@ -112,6 +114,13 @@ CREATE TABLE IF NOT EXISTS sender_reviews (
   PRIMARY KEY (account_id, address, kind)
 );
 """
+
+
+# Column additions for stores created before the column existed:
+# version -> [(table, column, type)].
+MIGRATIONS = {
+    3: [("actions", "new_message_id", "TEXT")],
+}
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -135,6 +144,12 @@ def migrate(connection: sqlite3.Connection) -> None:
     elif row["version"] > SCHEMA_VERSION:
         raise RuntimeError("Database was created by a newer email-cleaner; upgrade the code first.")
     elif row["version"] < SCHEMA_VERSION:
-        # Every change so far only adds tables, which SCHEMA creates above.
+        # v2 only added tables, which SCHEMA creates above; later steps alter them.
+        for version, columns in MIGRATIONS.items():
+            if row["version"] < version:
+                for table, column, kind in columns:
+                    existing = {c["name"] for c in connection.execute(f"PRAGMA table_info({table})")}
+                    if column not in existing:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
         connection.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
     connection.commit()

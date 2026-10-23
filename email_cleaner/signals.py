@@ -30,6 +30,7 @@ _PROTECT_PHRASES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
          r"(?:重設|重置|變更|修改|忘記)(?:您的|你的)?密碼|密碼(?:重設|重置|變更|已更改)", "密碼／帳號存取"),
         (r"security alert|suspicious|unusual (?:sign|activity)|安全性?警示|異常登入|登入通知|新裝置登入", "安全通知"),
         (r"\breceipt\b|\binvoice\b|收據|發票|電子發票|請款", "收據／發票"),
+        (r"對帳單|電子帳單|信用卡帳單|\be-?statement\b|\bstatement of account\b|\bmonthly statement\b", "對帳單"),
         (r"order (?:confirmation|confirmed|#)|訂單(?:確認|成立)|付款(?:成功|完成)|payment (?:received|confirmation)", "訂單／付款"),
         (r"booking confirm|reservation|itinerary|boarding pass|訂位|訂房|電子機票|登機證", "預訂／行程"),
         (r"friend request|shared (?:a|an|with)|invited you|好友邀請|與您共用|邀請您", "邀請／共用"),
@@ -73,12 +74,19 @@ def bulk_signals(meta: MessageMeta, headers: dict[str, str]) -> list[str]:
     return signals
 
 
+# Account and security labels count only in the subject: statements and receipts
+# often mention a PDF password or "security" in their opening lines.
+_SUBJECT_ONLY = {"驗證碼", "密碼／帳號存取", "安全通知"}
+
+
 def protect_signals(meta: MessageMeta) -> list[str]:
     signals = []
     if _REPLY_PREFIX.match(meta.subject):
         signals.append("回覆／轉寄串")
     haystack = f"{meta.subject}\n{meta.preview}"
-    signals.extend(label for pattern, label in _PROTECT_PHRASES if pattern.search(haystack))
+    for pattern, label in _PROTECT_PHRASES:
+        if pattern.search(meta.subject if label in _SUBJECT_ONLY else haystack):
+            signals.append(label)
     return signals
 
 

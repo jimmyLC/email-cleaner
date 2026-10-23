@@ -101,6 +101,18 @@ class OutlookTests(unittest.TestCase):
             {"emailAddresses": [{"address": " A@Client.Example "}, {"address": ""}]}]})])
         self.assertEqual(list(p.list_contact_addresses()), ["a@client.example"])
 
+    def test_writer_allows_only_move_and_folder_creation(self):
+        writer = outlook.OutlookWriter(SimpleNamespace(token=lambda: "t"), FakeSession([]))
+        for path in ("/me/messages/x", "/me/sendMail", "/me/messages/x/permanentDelete", "/me/messages/x/send"):
+            with self.assertRaises(PermissionError):
+                writer._call("POST", path)
+        for method in ("DELETE", "PATCH"):
+            with self.assertRaises(PermissionError):
+                writer._call(method, "/me/messages/x")
+        self.assertFalse(any(hasattr(writer, name) for name in ("delete", "send", "permanent_delete")))
+        with self.assertRaises(ValueError):
+            writer.ensure_folder("DeletedItems")
+
 
 if __name__ == "__main__":
     unittest.main()

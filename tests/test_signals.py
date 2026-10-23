@@ -44,6 +44,11 @@ class SignalTests(unittest.TestCase):
             headers=(("Authentication-Results", "spf=pass; dkim=pass; dmarc=pass"),)))
         self.assertEqual(result["risk"], [])
 
+    def test_statement_with_pdf_password_is_a_statement_not_an_account_notice(self):
+        result = signals.collect(meta(subject="中國信託銀行電子對帳單", preview="本對帳單已加密，開啟密碼請參考說明"))
+        self.assertIn("對帳單", result["protect"])
+        self.assertNotIn("密碼／帳號存取", result["protect"])
+
     def test_missing_policy_is_not_a_failure(self):
         result = signals.collect(meta(headers=(("Authentication-Results", "spf=none; dkim=none; dmarc=none"),)))
         self.assertEqual(result["risk"], [])
