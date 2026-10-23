@@ -17,4 +17,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["email_cleaner"]
+packages = ["email_cleaner", "email_cleaner.providers"]
+
+[project.scripts]
+email-cleaner = "email_cleaner.cli:main"
