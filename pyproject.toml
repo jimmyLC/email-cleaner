@@ -10,6 +10,7 @@ dependencies = [
   "requests>=2.32,<3",
   "python-dotenv>=1,<2",
   "typesafe-sdk>=0.7",
+  "mcp>=1.2,<2",
 ]
 
 [build-system]

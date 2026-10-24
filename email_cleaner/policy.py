@@ -2,10 +2,12 @@
 
 Order of precedence for one message:
 1. Protected client mail is filed under 客戶 (after it is 30 days old) and is never trashed.
+   The owner's decision on that exact message in the review queue comes next.
 2. The owner's active rules, most specific first. A trash rule never overrides a deletion guard.
 3. Built-in policies from local signals: receipts and orders go to 收據; account and
    security notices older than 30 days go to the trash.
-4. Anything else is left for Jev and the review queue (a later phase).
+4. Jev's classification, when present (see jev.disposition); unsure answers become "review".
+5. Anything else is left unclassified until Jev has seen it.
 
 Mail younger than 30 days stays in the Inbox unless a rule trashes it, so the Inbox
 ends up holding only recent, unprocessed mail and items waiting for review.
@@ -19,7 +21,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
-from email_cleaner import index
+from email_cleaner import index, jev, signals
 from email_cleaner.rules import Rule, active_rules, first_match
 
 CLIENT_FOLDER = "客戶"
@@ -37,7 +39,7 @@ class PlanItem:
     sender: str
     subject: str
     received_at: str | None
-    action: str  # archive | trash | keep
+    action: str  # archive | trash | keep | review
     target_folder: str | None
     reason: str
     rule_id: int | None = None
@@ -66,6 +68,18 @@ def decide(row: sqlite3.Row, rules: list[Rule], protection: str | None, guard: s
             return item("keep", None, f"客戶（{protection}），30 天內留在收件匣")
         return item("archive", CLIENT_FOLDER, f"客戶（{protection}）")
 
+    decision = row["review_decision"] if "review_decision" in row.keys() else None
+    if decision:
+        # The owner already decided this exact message in the review queue.
+        if decision == "keep":
+            return item("keep", None, "你決定保留")
+        if decision == "trash":
+            if guard:
+                return item("keep", None, f"你決定刪除，但{guard}", blocked=True)
+            return item("trash", None, "你決定刪除")
+        if decision.startswith("archive:"):
+            return item("archive", decision.partition(":")[2], "你決定歸檔")
+
     rule = first_match(rules, sender, subject)
     if rule:
         if rule.action == "trash":
@@ -88,6 +102,20 @@ def decide(row: sqlite3.Row, rules: list[Rule], protection: str | None, guard: s
         if guard:
             return item("keep", None, f"超過 30 天的帳號／安全通知，但{guard}", blocked=True)
         return item("trash", None, "超過 30 天的帳號／安全通知")
+    if "category" in row.keys() and row["category"]:
+        result = jev.Classification(row["category"], row["category_confidence"],
+                                    row["message_type"], row["message_type_confidence"])
+        # The subdomain check also covers rows indexed before that signal existed.
+        bulk_evidence = bool(json.loads(row["signals"] or "{}").get("bulk")) or signals.bulk_subdomain(sender)
+        action, folder, reason = jev.disposition(result, bulk_evidence)
+        if action == "trash_if_old":
+            action = "keep" if recent else "trash"
+            reason = f"{reason}，30 天內留在收件匣" if recent else reason
+        if action == "trash" and guard:
+            return item("keep", None, f"{reason}，但{guard}", blocked=True)
+        if action == "archive" and recent:
+            return item("keep", None, f"{reason}，30 天內留在收件匣")
+        return item(action, folder, reason)
     return item("keep", None, "尚未分類（待 Jev／確認）")
 
 
@@ -96,14 +124,21 @@ def build_plan(conn: sqlite3.Connection, account_id: str, senders: list[str] | N
     """Plan for Inbox messages, optionally limited to some senders. Read-only."""
     now = now or datetime.now(timezone.utc)
     rules = active_rules(conn)
-    query = "SELECT * FROM messages WHERE account_id = ? AND folder = 'inbox'"
+    query = """SELECT m.*, c.category, c.category_confidence, c.message_type, c.message_type_confidence,
+                      (SELECT q.resolution FROM review_queue q
+                       WHERE q.account_id = m.account_id AND q.message_id = m.message_id
+                         AND (q.resolution IN ('keep', 'trash') OR q.resolution LIKE 'archive:%')
+                       ORDER BY q.resolved_at DESC, q.id DESC LIMIT 1) AS review_decision
+               FROM messages m LEFT JOIN classifications c
+                 ON c.account_id = m.account_id AND c.message_id = m.message_id
+               WHERE m.account_id = ? AND m.folder = 'inbox'"""
     params: list = [account_id]
     if senders is not None:
-        query += f" AND sender_address IN ({','.join('?' * len(senders))})"
+        query += f" AND m.sender_address IN ({','.join('?' * len(senders))})"
         params += senders
     cache: dict[str, tuple[str | None, str | None]] = {}
     plan = []
-    for row in conn.execute(query + " ORDER BY received_at", params):
+    for row in conn.execute(query + " ORDER BY m.received_at", params):
         sender = row["sender_address"]
         if sender not in cache:
             cache[sender] = (index.protection_reason(conn, account_id, sender),
@@ -120,8 +155,8 @@ def top_senders(conn: sqlite3.Connection, account_id: str, groups: int) -> list[
 
 def summarize(plan: list[PlanItem]) -> dict:
     actions = Counter(item.action for item in plan)
-    reasons = Counter(item.reason.split("（")[0] if item.reason.startswith("客戶") else item.reason
-                      for item in plan)
+    # Group reasons by their stable prefix so per-rule and per-confidence variants collapse.
+    reasons = Counter(item.reason.split("（")[0].split("，")[0].split(" ")[0] for item in plan)
     folders = Counter(item.target_folder for item in plan if item.action == "archive")
     return {"total": len(plan), "actions": dict(actions), "archive_folders": dict(folders),
             "blocked": sum(item.blocked for item in plan), "reasons": dict(reasons.most_common(12))}

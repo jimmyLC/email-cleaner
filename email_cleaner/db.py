@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -98,6 +98,19 @@ CREATE TABLE IF NOT EXISTS actions (
   new_message_id TEXT
 );
 CREATE INDEX IF NOT EXISTS actions_by_batch ON actions(batch_id);
+
+-- Jev's answer for one message. No body text is stored, only the outcome.
+CREATE TABLE IF NOT EXISTS classifications (
+  account_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  category TEXT NOT NULL,
+  category_confidence REAL NOT NULL,
+  message_type TEXT NOT NULL,
+  message_type_confidence REAL NOT NULL,
+  model TEXT,
+  classified_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (account_id, message_id)
+);
 
 -- Sender-level questions for the owner, e.g. "you once wrote to this
 -- newsletter; keep it protected?". Pending items keep the safe default.

@@ -21,6 +21,15 @@ _BULK_SENDER = re.compile(
     re.IGNORECASE,
 )
 _BULK_PRECEDENCE = {"bulk", "list", "junk"}
+# Marketing platforms send from dedicated subdomains such as newsletter.trip.example
+# or mkt.shop.example. Only a subdomain counts, never the bare company domain.
+_BULK_SUBDOMAIN = {"newsletter", "newsletters", "news", "edm", "mkt", "marketing", "email", "emails", "e", "em",
+                   "mailer", "mailing", "campaign", "campaigns", "promo", "promotions", "crm", "info", "msg", "notify"}
+
+
+def bulk_subdomain(address: str) -> bool:
+    labels = address.rpartition("@")[2].casefold().split(".")
+    return len(labels) >= 3 and labels[0] in _BULK_SUBDOMAIN
 
 _PROTECT_PHRASES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pattern, re.IGNORECASE), label)
@@ -28,7 +37,8 @@ _PROTECT_PHRASES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"verification code|one[- ]time (?:pass|code)|\botp\b|驗證碼|認證碼|動態密碼", "驗證碼"),
         (r"reset (?:your )?password|password reset|forgot (?:your )?password|change (?:your )?password|"
          r"(?:重設|重置|變更|修改|忘記)(?:您的|你的)?密碼|密碼(?:重設|重置|變更|已更改)", "密碼／帳號存取"),
-        (r"security alert|suspicious|unusual (?:sign|activity)|安全性?警示|異常登入|登入通知|新裝置登入", "安全通知"),
+        (r"security alert|suspicious|unusual (?:sign|activity)|new (?:sign-?in|login)|username changed|"
+         r"安全性?警示|異常登入|登入(?:成功)?通知|新的登入|新裝置登入|生物辨識登入", "安全通知"),
         (r"\breceipt\b|\binvoice\b|收據|發票|電子發票|請款", "收據／發票"),
         (r"對帳單|電子帳單|信用卡帳單|\be-?statement\b|\bstatement of account\b|\bmonthly statement\b", "對帳單"),
         (r"order (?:confirmation|confirmed|#)|訂單(?:確認|成立)|付款(?:成功|完成)|payment (?:received|confirmation)", "訂單／付款"),
@@ -71,6 +81,8 @@ def bulk_signals(meta: MessageMeta, headers: dict[str, str]) -> list[str]:
         signals.append("內文含取消訂閱")
     if _BULK_SENDER.match(meta.sender_address.partition("@")[0]):
         signals.append("寄件者為電子報／行銷帳號")
+    if bulk_subdomain(meta.sender_address):
+        signals.append("寄件網域為行銷子網域")
     return signals
 
 

@@ -123,12 +123,14 @@ class OutlookProvider:
         self.sleep = sleep
         self._account: str | None = None
 
-    def _get(self, url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+    def _get(self, url: str, params: dict[str, str] | None = None,
+             extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
         # GET only: this provider is read-only by construction.
         for attempt in range(MAX_RETRIES + 1):
             response = self.session.get(url, params=params, timeout=45, headers={
                 "Authorization": f"Bearer {self.auth.token()}",
                 "Accept": "application/json",
+                **(extra_headers or {}),
             })
             if response.status_code in (429, 503, 504) and attempt < MAX_RETRIES:
                 try:
@@ -164,6 +166,12 @@ class OutlookProvider:
         url = f"{GRAPH}/me/mailFolders/{quote(FOLDERS[folder])}/messages"
         for raw in self._pages(url, params):
             yield to_meta(raw, folder)
+
+    def get_body_text(self, message_id: str) -> str:
+        """Plain-text body for one message, fetched on demand and never stored."""
+        raw = self._get(f"{GRAPH}/me/messages/{quote(message_id, safe='')}", {"$select": "body"},
+                        {"Prefer": 'outlook.body-content-type="text"'})
+        return ((raw.get("body") or {}).get("content")) or ""
 
     def list_contact_addresses(self) -> Iterator[str]:
         for contact in self._pages(f"{GRAPH}/me/contacts", {"$select": "emailAddresses", "$top": str(PAGE_SIZE)}):

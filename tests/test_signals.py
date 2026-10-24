@@ -49,6 +49,14 @@ class SignalTests(unittest.TestCase):
         self.assertIn("對帳單", result["protect"])
         self.assertNotIn("密碼／帳號存取", result["protect"])
 
+    def test_marketing_subdomain_counts_as_bulk_but_bare_domain_does_not(self):
+        self.assertIn("寄件網域為行銷子網域", signals.collect(meta(sender_address="trip@newsletter.trip.example"))["bulk"])
+        self.assertNotIn("寄件網域為行銷子網域", signals.collect(meta(sender_address="info@news.example"))["bulk"])
+
+    def test_login_success_and_new_sign_in_are_security_notices(self):
+        for subject in ("範例商店登入成功通知", "新的登入：來自範例裝置", "Username changed on Example"):
+            self.assertIn("安全通知", signals.collect(meta(subject=subject))["protect"], subject)
+
     def test_missing_policy_is_not_a_failure(self):
         result = signals.collect(meta(headers=(("Authentication-Results", "spf=none; dkim=none; dmarc=none"),)))
         self.assertEqual(result["risk"], [])

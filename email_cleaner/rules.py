@@ -62,3 +62,34 @@ def set_status(conn: sqlite3.Connection, rule_id: int, status: str) -> None:
     if conn.execute("UPDATE rules SET status = ? WHERE id = ?", (status, rule_id)).rowcount != 1:
         raise ValueError(f"No rule {rule_id}")
     conn.commit()
+
+
+def propose(conn: sqlite3.Connection, scope: str, sender: str, action: str, note: str,
+            subject_keyword: str | None = None, target_folder: str | None = None, origin: str = "claude") -> int:
+    """Store a rule draft. Drafts never act until the owner approves them."""
+    return add_rule(conn, scope, sender, action, origin, subject_keyword=subject_keyword,
+                    target_folder=target_folder, status="draft", note=note)
+
+
+def drafts(conn: sqlite3.Connection, account_id: str) -> list[dict]:
+    """Pending drafts with how many Inbox messages each would affect."""
+    result = []
+    for row in conn.execute("SELECT * FROM rules WHERE status = 'draft' ORDER BY id"):
+        rule = Rule(row["id"], row["scope"], row["sender"], row["subject_keyword"], row["action"], row["target_folder"])
+        like = f"%@{rule.sender}" if rule.scope != "address" else rule.sender
+        candidates = conn.execute(
+            "SELECT subject, sender_address FROM messages WHERE account_id = ? AND folder = 'inbox' AND sender_address LIKE ?",
+            (account_id, like)).fetchall()
+        matched = [c["subject"] for c in candidates if rule.matches(c["sender_address"], c["subject"])]
+        result.append({"id": rule.id, "scope": rule.scope, "sender": rule.sender, "keyword": rule.subject_keyword,
+                       "action": rule.action, "folder": rule.target_folder, "note": row["note"],
+                       "origin": row["origin"], "matches": len(matched), "sample_subjects": matched[:3]})
+    return result
+
+
+def decide_draft(conn: sqlite3.Connection, rule_id: int, approve: bool) -> None:
+    changed = conn.execute("UPDATE rules SET status = ? WHERE id = ? AND status = 'draft'",
+                           ("active" if approve else "disabled", rule_id)).rowcount
+    if changed != 1:
+        raise ValueError(f"No draft rule {rule_id}")
+    conn.commit()

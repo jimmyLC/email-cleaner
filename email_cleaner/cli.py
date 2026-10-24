@@ -12,7 +12,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from email_cleaner import db, index, policy, rules
+from email_cleaner import db, index, policy, review, rules
 from email_cleaner.config import PROJECT, db_path
 
 
@@ -92,6 +92,21 @@ def cmd_protection_review(args) -> int:
 
 def cmd_rule(args) -> int:
     with db.connect(db_path()) as conn:
+        if args.rule_command == "drafts":
+            account = account_for(conn, "outlook")
+            for draft in rules.drafts(conn, account):
+                keyword = f" 主旨含「{draft['keyword']}」" if draft["keyword"] else ""
+                folder = f" → {draft['folder']}" if draft["folder"] else ""
+                print(f"#{draft['id']:<4} {draft['sender']}{keyword}  {draft['action']}{folder}  "
+                      f"影響 {draft['matches']} 封  理由：{draft['note']}")
+                for subject in draft["sample_subjects"]:
+                    print(f"        - {subject}")
+            return 0
+        if args.rule_command in ("approve", "reject"):
+            for rule_id in args.ids:
+                rules.decide_draft(conn, rule_id, approve=args.rule_command == "approve")
+            print(f"{args.rule_command}d {len(args.ids)} draft(s)")
+            return 0
         if args.rule_command == "add":
             rule_id = rules.add_rule(conn, args.scope, args.sender, args.action, "user",
                                      subject_keyword=args.keyword, target_folder=args.folder)
@@ -152,6 +167,51 @@ def cmd_undo(args) -> int:
     return 0 if result.failed == 0 else 1
 
 
+def cmd_classify(args) -> int:
+    from typesafe_sdk import TypeSafeClient
+    from email_cleaner import jev
+    with db.connect(db_path()) as conn:
+        account = account_for(conn, args.provider)
+        senders = policy.top_senders(conn, account, args.groups) if args.groups else None
+        plan = policy.build_plan(conn, account, senders)
+        # Only messages no rule or built-in policy has decided are sent to Jev.
+        todo = [item.message_id for item in plan if item.reason == "尚未分類（待 Jev／確認）"]
+        if args.sample:
+            import random
+            # Spread a trial across the mailbox instead of taking only the oldest mail.
+            todo = random.Random(args.seed).sample(todo, min(args.limit, len(todo)))
+        todo = todo[:args.limit]
+        print(f"Sending {len(todo)} messages to Jev (sender, subject, signals, redacted excerpt).")
+        provider = outlook_provider()
+        with TypeSafeClient() as client:
+            counts = jev.classify_pending(conn, account, todo, client, provider.get_body_text)
+        queued = review.enqueue(conn, account, policy.build_plan(conn, account, senders))
+    print(f"Classified {counts['classified']}, skipped {counts['skipped']}; {queued} new review item(s). "
+          "No mail was changed.")
+    return 0
+
+
+def cmd_review(args) -> int:
+    with db.connect(db_path()) as conn:
+        account = account_for(conn, args.provider)
+        if args.review_command == "decide":
+            rule_id = review.resolve(conn, account, args.id, args.action, args.folder, args.rule)
+            print(f"Review #{args.id}: {args.action}" + (f"; created rule #{rule_id}" if rule_id else ""))
+            return 0
+        plan = policy.build_plan(conn, account)
+        review.prune(conn, account, plan)
+        review.enqueue(conn, account, plan)
+        for item in review.pending(conn, account, args.limit):
+            print(f"#{item['id']:<5} {item['sender_address']}  {item['subject'][:60]}  ({item['reason']})")
+    return 0
+
+
+def cmd_mcp(args) -> int:
+    from email_cleaner.mcp_server import main as serve
+    serve()
+    return 0
+
+
 def cmd_client_domain(args) -> int:
     with db.connect(db_path()) as conn:
         if args.action == "add":
@@ -196,9 +256,13 @@ def main(argv: list[str] | None = None) -> int:
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=cmd_protection_review)
 
-    rule = commands.add_parser("rule", help="List, add, enable or disable cleanup rules")
+    rule = commands.add_parser("rule", help="List, add, approve or disable cleanup rules")
     rule_commands = rule.add_subparsers(dest="rule_command")
     rule_commands.add_parser("list")
+    rule_commands.add_parser("drafts", help="Show drafts waiting for approval")
+    for name in ("approve", "reject"):
+        decide = rule_commands.add_parser(name)
+        decide.add_argument("ids", type=int, nargs="+")
     add = rule_commands.add_parser("add")
     add.add_argument("--scope", required=True, choices=["address", "domain", "domain_subject"])
     add.add_argument("--sender", required=True, help="address, or domain for domain scopes")
@@ -221,6 +285,28 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--json", action="store_true")
         else:
             sub.add_argument("--yes", action="store_true")
+
+    classify = commands.add_parser("classify", help="Send unclassified messages to Jev (no mail is changed)")
+    classify.add_argument("provider", choices=["outlook"])
+    classify.add_argument("--limit", type=int, default=50)
+    classify.add_argument("--groups", type=int, default=0)
+    classify.add_argument("--sample", action="store_true", help="pick a random sample instead of the oldest mail")
+    classify.add_argument("--seed", type=int, default=0)
+    classify.set_defaults(func=cmd_classify)
+
+    reviews = commands.add_parser("review", help="List or decide messages Jev was unsure about")
+    reviews.add_argument("provider", choices=["outlook"])
+    review_commands = reviews.add_subparsers(dest="review_command")
+    review_list = review_commands.add_parser("list")
+    review_list.add_argument("--limit", type=int, default=50)
+    decide = review_commands.add_parser("decide")
+    decide.add_argument("id", type=int)
+    decide.add_argument("action", choices=["trash", "archive", "keep"])
+    decide.add_argument("--folder")
+    decide.add_argument("--rule", choices=["address", "domain"], help="also create a rule for this sender")
+    reviews.set_defaults(func=cmd_review, review_command="list", limit=50)
+
+    commands.add_parser("mcp", help="Run the MCP server on stdio").set_defaults(func=cmd_mcp)
 
     undo = commands.add_parser("undo", help="Move a batch's messages back to the Inbox")
     undo.add_argument("provider", choices=["outlook"])
