@@ -127,6 +127,18 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(index.deletion_guard(self.conn, "outlook:acct", "news@letter.example"), "使用者指定不刪除")
         self.assertIsNone(index.deletion_guard(self.conn, "outlook:acct", "ads@shop.example"))
 
+    def test_service_mailboxes_you_wrote_to_are_queued(self):
+        inbox = [msg(1, sender="support@service.example"), msg(2, sender="anna.lee@client.example"),
+                 msg(3, sender="customercare@gadget.example")]
+        sent = [msg(1, "sent", recipients=("support@service.example", "anna.lee@client.example",
+                                           "customercare@gadget.example"))]
+        index.sync(self.conn, FakeProvider(inbox, sent))
+        self.assertEqual(index.flag_protection_reviews(self.conn, "outlook:acct"), 2)
+        pending = {p["address"]: p["reason"] for p in index.pending_protection_reviews(self.conn, "outlook:acct")}
+        self.assertEqual(set(pending), {"support@service.example", "customercare@gadget.example"})
+        self.assertIn("客服／服務地址", pending["support@service.example"])
+        self.assertFalse(index.ROLE_ADDRESS.match("supportive.person"))
+
     def test_client_domain_still_protects_an_unprotected_address(self):
         bulk = (("List-Unsubscribe", "<https://x>"),)
         index.sync(self.conn, FakeProvider([msg(1, sender="news@partner.example", headers=bulk)],

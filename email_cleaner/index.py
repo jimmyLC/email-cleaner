@@ -8,12 +8,21 @@ contacts) so client mail can be recognised without asking an AI.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Iterable
 
 from email_cleaner import signals
 from email_cleaner.providers.base import MessageMeta, Provider
+
+
+# Shared mailboxes of companies and services (support@, service@ ...). Writing
+# to one makes it look like a client, though it is usually a service provider.
+ROLE_ADDRESS = re.compile(
+    r"^(?:support|service|services|contact|info|hello|help|helpdesk|customercare|customer|customerservice|"
+    r"feedback|cs|care|admin|team|sales|billing|account|accounts|orders?|reservations?|booking|"
+    r"studentadvisor\w*|noreply|no-reply|donotreply|do-not-reply)(?:[._+-]|$)", re.IGNORECASE)
 
 
 @dataclass
@@ -119,9 +128,10 @@ def deletion_guard(conn: sqlite3.Connection, account_id: str, address: str) -> s
 
 
 def flag_protection_reviews(conn: sqlite3.Connection, account_id: str, min_bulk_ratio: float = 0.8) -> int:
-    """Queue senders protected by sent mail whose inbox mail looks like a newsletter.
+    """Queue senders protected by sent mail that look like newsletters or service mailboxes.
 
-    Replying once to a newsletter makes it look like a client. These stay
+    Replying once to a newsletter, or writing to a company's support@ address,
+    makes the sender look like a client. These stay
     protected until the owner decides; nothing is unprotected automatically.
     """
     rows = conn.execute(
@@ -133,12 +143,20 @@ def flag_protection_reviews(conn: sqlite3.Connection, account_id: str, min_bulk_
            WHERE m.account_id = ? AND m.folder = 'inbox'
            GROUP BY m.sender_address HAVING bulk >= ?""",
         (account_id, min_bulk_ratio)).fetchall()
+    reasons = {row["sender_address"]: f"曾寄信給對方，但 {row['bulk']:.0%} 的來信有群發佐證（共 {row['total']} 封）"
+               for row in rows}
+    for row in conn.execute(
+            """SELECT m.sender_address, count(*) AS total FROM messages m
+               JOIN known_correspondents k ON k.account_id = m.account_id AND k.address = m.sender_address
+                    AND k.source = 'sent'
+               WHERE m.account_id = ? AND m.folder = 'inbox' GROUP BY m.sender_address""", (account_id,)):
+        if row["sender_address"] not in reasons and ROLE_ADDRESS.match(row["sender_address"].partition("@")[0]):
+            reasons[row["sender_address"]] = f"曾寄信給對方，但看起來是客服／服務地址（共 {row['total']} 封）"
     added = 0
-    for row in rows:
-        reason = f"曾寄信給對方，但 {row['bulk']:.0%} 的來信有群發佐證（共 {row['total']} 封）"
+    for address, reason in reasons.items():
         added += conn.execute(
             """INSERT OR IGNORE INTO sender_reviews (account_id, address, kind, reason)
-               VALUES (?, ?, 'protection', ?)""", (account_id, row["sender_address"], reason)).rowcount
+               VALUES (?, ?, 'protection', ?)""", (account_id, address, reason)).rowcount
     conn.commit()
     return added
 
