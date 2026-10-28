@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 
 from email_cleaner import db, index, policy, review, rules
 from email_cleaner.config import db_path
+from email_cleaner.providers import registry
 
 server = FastMCP("email-cleaner")
 
@@ -23,30 +24,32 @@ def _conn():
     return db.connect(db_path())
 
 
-def _account(conn) -> str:
-    row = conn.execute("SELECT id FROM accounts WHERE provider = 'outlook' ORDER BY created_at LIMIT 1").fetchone()
+def _account(conn, provider: str = "outlook") -> str:
+    if provider not in registry.PROVIDERS:
+        raise ValueError(f"provider must be one of {registry.PROVIDERS}")
+    row = conn.execute("SELECT id FROM accounts WHERE provider = ? ORDER BY created_at LIMIT 1", (provider,)).fetchone()
     if not row:
-        raise RuntimeError("No mailbox indexed yet; the owner must run `email-cleaner sync outlook`.")
+        raise RuntimeError(f"No mailbox indexed yet; the owner must run `email-cleaner sync {provider}`.")
     return row[0]
 
 
 @server.tool()
-def stats() -> dict:
+def stats(provider: str = "outlook") -> dict:
     """Index totals: messages per folder, distinct senders, and the planned actions."""
     with _conn() as conn:
-        account = _account(conn)
+        account = _account(conn, provider)
         return {"index": index.stats(conn, account), "plan": policy.summarize(policy.build_plan(conn, account))}
 
 
 @server.tool()
-def list_sender_groups(limit: int = 50, only_uncovered: bool = True) -> list[dict]:
+def list_sender_groups(limit: int = 50, only_uncovered: bool = True, provider: str = "outlook") -> list[dict]:
     """Largest Inbox sender groups with sample subjects. By default skips senders an active rule already covers.
 
     Use this to draft rules. Fields: sender, total, unread, bulk_ratio (share with newsletter evidence),
     risk, protected (client reason or null), never_delete (guard reason or null), sample_subjects.
     """
     with _conn() as conn:
-        account = _account(conn)
+        account = _account(conn, provider)
         active = rules.active_rules(conn)
         groups = []
         for group in index.sender_groups(conn, account, limit=limit * 3 if only_uncovered else limit):
@@ -108,19 +111,19 @@ def create_rule(scope: str, sender: str, action: str, note: str,
 
 
 @server.tool()
-def preview_plan(groups: int = 0) -> dict:
+def preview_plan(groups: int = 0, provider: str = "outlook") -> dict:
     """What applying the rules would do now, without changing anything. groups limits to the N largest senders."""
     with _conn() as conn:
-        account = _account(conn)
+        account = _account(conn, provider)
         senders = policy.top_senders(conn, account, groups) if groups else None
         return policy.summarize(policy.build_plan(conn, account, senders))
 
 
 @server.tool()
-def list_review_queue(limit: int = 50) -> list[dict]:
+def list_review_queue(limit: int = 50, provider: str = "outlook") -> list[dict]:
     """Messages waiting for the owner's decision (Jev was unsure). Read-only for AI callers."""
     with _conn() as conn:
-        return review.pending(conn, _account(conn), limit)
+        return review.pending(conn, _account(conn, provider), limit)
 
 
 @server.tool()
@@ -132,26 +135,24 @@ def get_action_log(limit: int = 50) -> list[dict]:
 
 
 @server.tool()
-def apply_plan(groups: int = 0) -> dict:
+def apply_plan(groups: int = 0, provider: str = "outlook") -> dict:
     """Carry out the current plan (archive or Deleted Items only), all guards applied. Returns a batch to undo."""
-    from email_cleaner.executor import Executor
-    from email_cleaner.providers.outlook import WRITE_SCOPES, OutlookAuth, OutlookWriter
+    from email_cleaner.executor import DEFAULT_PACE, Executor
     with _conn() as conn:
-        account = _account(conn)
+        account = _account(conn, provider)
         senders = policy.top_senders(conn, account, groups) if groups else None
         plan = policy.build_plan(conn, account, senders)
         review.enqueue(conn, account, plan)
-        result = Executor(conn, OutlookWriter(OutlookAuth(scopes=WRITE_SCOPES)), account, "mcp").execute(plan)
+        result = Executor(conn, registry.writer(provider), account, "mcp", pace=DEFAULT_PACE).execute(plan)
         return json.loads(json.dumps(result.__dict__))
 
 
 @server.tool()
-def undo_batch(batch_id: str) -> dict:
+def undo_batch(batch_id: str, provider: str = "outlook") -> dict:
     """Move every message of a batch back to the Inbox."""
     from email_cleaner.executor import Executor
-    from email_cleaner.providers.outlook import WRITE_SCOPES, OutlookAuth, OutlookWriter
     with _conn() as conn:
-        result = Executor(conn, OutlookWriter(OutlookAuth(scopes=WRITE_SCOPES)), _account(conn), "mcp").undo(batch_id)
+        result = Executor(conn, registry.writer(provider), _account(conn, provider), "mcp").undo(batch_id)
         return json.loads(json.dumps(result.__dict__))
 
 

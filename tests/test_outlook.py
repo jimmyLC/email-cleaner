@@ -113,6 +113,14 @@ class OutlookTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             writer.ensure_folder("DeletedItems")
 
+    def test_archive_names_use_outlooks_own_archive_folder_and_never_create_one(self):
+        session = FakeSession([FakeResponse(payload={"id": "ARCHIVE"})])
+        writer = outlook.OutlookWriter(SimpleNamespace(token=lambda: "t"), session)
+        self.assertEqual(writer.ensure_folder("封存"), "ARCHIVE")
+        self.assertEqual(writer.ensure_folder("Archive"), "ARCHIVE")
+        self.assertEqual(len(session.calls), 1)
+        self.assertTrue(session.calls[0][0].endswith("/me/mailFolders/archive"))
+
 
 if __name__ == "__main__":
     unittest.main()

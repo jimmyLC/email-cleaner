@@ -21,6 +21,11 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(set(result["bulk"]), {"List-Unsubscribe 標頭", "支援一鍵退訂", "Precedence: bulk",
                                                "內文含取消訂閱", "寄件者為電子報／行銷帳號"})
 
+    def test_gmail_promotion_tabs_count_as_bulk_but_updates_do_not(self):
+        self.assertIn("Gmail 分類：促銷", signals.collect(meta(categories=("gmail:promotions",)))["bulk"])
+        self.assertEqual(signals.collect(meta(sender_address="alerts@bank.example",
+                                              categories=("gmail:updates",)))["bulk"], [])
+
     def test_protect_signals(self):
         self.assertIn("回覆／轉寄串", signals.collect(meta(subject="Re: 報價"))["protect"])
         self.assertIn("驗證碼", signals.collect(meta(subject="Example Corp verification code 000000"))["protect"])

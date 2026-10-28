@@ -88,13 +88,17 @@ class PolicyTests(unittest.TestCase):
             msg(4, "account@site.example", "驗證碼 123456", received=RECENT),
             msg(5, "news@letter.example", "Weekly"),
             msg(6, "ebill@bank.example", "電子對帳單 2026年9月", preview="開啟密碼為身分證字號"),
+            msg(7, "shop@store.example", "訂單確認 #123"),
+            msg(8, "shop@store.example", "範例商店電子發票", received=RECENT),
         ])
-        self.assertEqual((plan["inbox1"].action, plan["inbox1"].target_folder), ("archive", "收據"))
+        self.assertEqual((plan["inbox1"].action, plan["inbox1"].target_folder), ("archive", "發票"))
         self.assertEqual(plan["inbox2"].action, "keep")
+        self.assertEqual(plan["inbox7"].action, "keep")  # orders have no folder in the owner's plan
+        self.assertEqual(plan["inbox8"].action, "keep")  # an invoice under 30 days old waits
         self.assertEqual(plan["inbox3"].action, "trash")
         self.assertEqual(plan["inbox4"].action, "keep")
         self.assertEqual(plan["inbox5"].reason, "尚未分類（待 Jev／確認）")
-        self.assertEqual((plan["inbox6"].action, plan["inbox6"].target_folder), ("archive", "收據"))
+        self.assertEqual((plan["inbox6"].action, plan["inbox6"].target_folder), ("archive", "銀行"))
 
     def test_recent_archive_rule_waits_but_trash_rule_does_not(self):
         rules.add_rule(self.conn, "address", "ads@shop.example", "trash", "user")
@@ -113,6 +117,13 @@ class PolicyTests(unittest.TestCase):
         summary = policy.summarize(plan)
         self.assertEqual(summary["total"], 3)
         self.assertEqual(json.loads(json.dumps(policy.to_json(plan)))[0]["sender"], "big@a.example")
+
+    def test_summary_collapses_rule_ids_and_confidence_but_keeps_whole_reasons(self):
+        def item(reason):
+            return policy.PlanItem("m", "s@a.example", "", None, "keep", None, reason)
+        reasons = ["規則 #3", "規則 #12，30 天內留在收件匣", "Jev：newsletter 98%", "超過 30 天的帳號／安全通知"]
+        summary = policy.summarize([item(reason) for reason in reasons])
+        self.assertEqual(summary["reasons"], {"規則": 2, "Jev：newsletter": 1, "超過 30 天的帳號／安全通知": 1})
 
 
 if __name__ == "__main__":

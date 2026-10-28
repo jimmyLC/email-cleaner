@@ -61,6 +61,26 @@ class IndexTests(unittest.TestCase):
         index.sync(self.conn, provider, full=True)
         self.assertEqual(provider.calls[-2], ("inbox", None))
 
+    def test_full_sync_marks_mail_the_mailbox_no_longer_holds(self):
+        provider = FakeProvider([msg(1), msg(2), msg(3)])
+        index.sync(self.conn, provider)
+        provider.data["inbox"] = [msg(1), msg(3)]  # the owner moved inbox2 by hand
+        index.sync(self.conn, provider)
+        self.assertEqual(self.conn.execute("SELECT folder FROM messages WHERE message_id = 'inbox2'").fetchone()[0], "inbox")
+        index.sync(self.conn, provider, full=True)
+        folders = dict(self.conn.execute("SELECT message_id, folder FROM messages").fetchall())
+        self.assertEqual(folders, {"inbox1": "inbox", "inbox2": "missing", "inbox3": "inbox"})
+
+    def test_owner_can_unprotect_a_sender_that_was_never_queued_for_review(self):
+        provider = FakeProvider(inbox=[msg(1, sender="support@service.example")],
+                                sent=[msg(1, "sent", sender="me@home.example", recipients=("Support@Service.Example",))])
+        index.sync(self.conn, provider)
+        self.assertEqual(index.deletion_guard(self.conn, "outlook:acct", "support@service.example"), "曾寄信給對方")
+        index.set_protection_decision(self.conn, "outlook:acct", "Support@Service.Example", "unprotect")
+        self.assertIsNone(index.deletion_guard(self.conn, "outlook:acct", "support@service.example"))
+        with self.assertRaises(ValueError):
+            index.set_protection_decision(self.conn, "outlook:acct", "support@service.example", "delete")
+
     def test_protection_from_sent_contacts_and_client_domains(self):
         provider = FakeProvider(
             inbox=[msg(1, sender="boss@client.example"), msg(2, sender="friend@mail.example"),

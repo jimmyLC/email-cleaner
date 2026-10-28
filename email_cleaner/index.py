@@ -54,6 +54,19 @@ def store_message(conn: sqlite3.Connection, account_id: str, meta: MessageMeta) 
     )
 
 
+def mark_missing(conn: sqlite3.Connection, account_id: str, folder: str, seen: set[str]) -> int:
+    """After a full listing, mark rows the mailbox no longer holds in this folder.
+
+    Mail the owner moved or deleted by hand gets a new ID in its new place, so the old
+    row would otherwise keep counting toward the plan. 'missing' rows are kept for history.
+    """
+    stale = [(account_id, row[0]) for row in conn.execute(
+        "SELECT message_id FROM messages WHERE account_id = ? AND folder = ?", (account_id, folder))
+        if row[0] not in seen]
+    conn.executemany("UPDATE messages SET folder = 'missing' WHERE account_id = ? AND message_id = ?", stale)
+    return len(stale)
+
+
 def add_correspondents(conn: sqlite3.Connection, account_id: str, addresses: Iterable[str], source: str) -> int:
     rows = {(account_id, address.casefold(), source) for address in addresses if "@" in address}
     conn.executemany("INSERT OR IGNORE INTO known_correspondents (account_id, address, source) VALUES (?, ?, ?)",
@@ -75,13 +88,17 @@ def sync(conn: sqlite3.Connection, provider: Provider, full: bool = False,
     result = SyncResult()
     for folder in ("inbox", "sent"):
         since = None if full else latest_received(conn, account_id, folder)
+        seen: set[str] = set()
         for count, meta in enumerate(provider.list_messages(folder, received_after=since), 1):
             store_message(conn, account_id, meta)
+            seen.add(meta.message_id)
             if folder == "sent":
                 result.correspondents += add_correspondents(conn, account_id, meta.recipients, "sent")
             setattr(result, folder, count)
             if count % commit_every == 0:
                 conn.commit()  # keep progress if a long first sync is interrupted
+        if full:
+            mark_missing(conn, account_id, folder, seen)
         conn.commit()
     result.contacts = add_correspondents(conn, account_id, provider.list_contact_addresses(), "contact")
     conn.commit()
@@ -188,6 +205,24 @@ def resolve_protection_review(conn: sqlite3.Connection, account_id: str, address
         (resolution, account_id, address.casefold())).rowcount
     if not changed:
         raise ValueError("No protection review for that address")
+    conn.commit()
+
+
+def set_protection_decision(conn: sqlite3.Connection, account_id: str, address: str, resolution: str,
+                            reason: str = "擁有者指定") -> None:
+    """Record the owner's decision for a sender even if it was never queued for review.
+
+    Needed when the owner names a sender directly, for example "this is a service mailbox,
+    delete it". Only the owner's CLI/UI may call this, never MCP.
+    """
+    if resolution not in ("keep", "unprotect", "not_client"):
+        raise ValueError("resolution must be keep, unprotect or not_client")
+    conn.execute(
+        """INSERT INTO sender_reviews (account_id, address, kind, reason, resolution, resolved_at)
+           VALUES (?, ?, 'protection', ?, ?, datetime('now'))
+           ON CONFLICT (account_id, address, kind) DO UPDATE SET
+               resolution = excluded.resolution, resolved_at = excluded.resolved_at""",
+        (account_id, address.casefold(), reason, resolution))
     conn.commit()
 
 

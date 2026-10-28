@@ -14,11 +14,15 @@ from dotenv import load_dotenv
 
 from email_cleaner import db, index, policy, review, rules
 from email_cleaner.config import PROJECT, db_path
+from email_cleaner.providers import registry
 
 
-def outlook_provider():
-    from email_cleaner.providers.outlook import OutlookAuth, OutlookProvider
-    return OutlookProvider(OutlookAuth())
+def any_account(conn) -> str:
+    """The first indexed account, for commands that are not tied to one provider."""
+    row = conn.execute("SELECT id FROM accounts ORDER BY provider = 'outlook' DESC, created_at LIMIT 1").fetchone()
+    if not row:
+        raise RuntimeError("No mailbox indexed yet; run `sync` first.")
+    return row[0]
 
 
 def account_for(conn, provider_name: str) -> str:
@@ -30,21 +34,19 @@ def account_for(conn, provider_name: str) -> str:
 
 
 def cmd_login(args) -> int:
-    from email_cleaner.providers.outlook import WRITE_SCOPES, OutlookAuth
-    OutlookAuth(scopes=WRITE_SCOPES if args.write else None).device_login()
-    print("Outlook sign-in complete " + ("(can move mail)." if args.write else "(read-only scopes)."))
+    print(registry.login(args.provider, args.write))
     return 0
 
 
 def cmd_sync(args) -> int:
     with db.connect(db_path()) as conn:
-        provider = outlook_provider()
+        provider = registry.reader(args.provider)
         result = index.sync(conn, provider, full=args.full)
         flagged = index.flag_protection_reviews(conn, provider.account_id())
     print(f"Indexed inbox {result.inbox}, sent {result.sent}; "
           f"{result.correspondents} sent-to addresses, {result.contacts} contact addresses. No mail was changed.")
     if flagged:
-        print(f"{flagged} protected sender(s) look like newsletters; see `protection-review outlook`.")
+        print(f"{flagged} protected sender(s) look like newsletters; see `protection-review {args.provider}`.")
     return 0
 
 
@@ -93,7 +95,7 @@ def cmd_protection_review(args) -> int:
 def cmd_rule(args) -> int:
     with db.connect(db_path()) as conn:
         if args.rule_command == "drafts":
-            account = account_for(conn, "outlook")
+            account = any_account(conn)
             for draft in rules.drafts(conn, account):
                 keyword = f" 主旨含「{draft['keyword']}」" if draft["keyword"] else ""
                 folder = f" → {draft['folder']}" if draft["folder"] else ""
@@ -125,7 +127,8 @@ def cmd_rule(args) -> int:
 def _plan(conn, args):
     account = account_for(conn, args.provider)
     senders = args.sender or (policy.top_senders(conn, account, args.groups) if args.groups else None)
-    return account, policy.build_plan(conn, account, senders)
+    keep = args.keep_newest if args.finish else 0
+    return account, policy.build_plan(conn, account, senders, finish=args.finish, keep_newest=keep)
 
 
 def cmd_plan(args) -> int:
@@ -140,8 +143,7 @@ def cmd_plan(args) -> int:
 
 
 def cmd_apply(args) -> int:
-    from email_cleaner.executor import Executor
-    from email_cleaner.providers.outlook import WRITE_SCOPES, OutlookAuth, OutlookWriter
+    from email_cleaner.executor import DEFAULT_PACE, Executor
     with db.connect(db_path()) as conn:
         account, plan = _plan(conn, args)
         summary = policy.summarize(plan)
@@ -149,22 +151,40 @@ def cmd_apply(args) -> int:
         if not args.yes:
             print("Preview only. Re-run with --yes to move these messages (archive or Deleted Items only).")
             return 0
-        writer = OutlookWriter(OutlookAuth(scopes=WRITE_SCOPES))
-        result = Executor(conn, writer, account, actor="user").execute(plan)
+        result = Executor(conn, registry.writer(args.provider), account, actor="user",
+                          pace=DEFAULT_PACE).execute(plan)
     print(f"Batch {result.batch_id}: moved {result.moved}, skipped {result.skipped}, "
-          f"blocked {result.blocked}, failed {result.failed}. Undo with: undo outlook {result.batch_id}")
+          f"blocked {result.blocked}, failed {result.failed}. Undo with: undo {args.provider} {result.batch_id}")
     return 0 if result.failed == 0 else 1
 
 
 def cmd_undo(args) -> int:
-    from email_cleaner.executor import Executor
-    from email_cleaner.providers.outlook import WRITE_SCOPES, OutlookAuth, OutlookWriter
+    from email_cleaner.executor import DEFAULT_PACE, Executor
     with db.connect(db_path()) as conn:
         account = account_for(conn, args.provider)
-        writer = OutlookWriter(OutlookAuth(scopes=WRITE_SCOPES))
-        result = Executor(conn, writer, account, actor="user").undo(args.batch)
+        result = Executor(conn, registry.writer(args.provider), account, actor="user",
+                          pace=DEFAULT_PACE).undo(args.batch)
     print(f"Batch {args.batch}: restored {result.moved}, already in Inbox {result.skipped}, failed {result.failed}.")
     return 0 if result.failed == 0 else 1
+
+
+def _spread_per_sender(conn, account: str, plan, per_sender: int) -> list[str]:
+    """For each sender, up to `per_sender` unclassified messages spread from oldest to newest."""
+    by_sender: dict[str, list[str]] = {}
+    for item in plan:
+        if item.reason == "尚未分類（待 Jev／確認）":
+            by_sender.setdefault(item.sender, []).append(item.message_id)  # plan is oldest first
+    done = dict(conn.execute(
+        """SELECT m.sender_address, count(*) FROM classifications c JOIN messages m
+             ON m.account_id = c.account_id AND m.message_id = c.message_id
+           WHERE c.account_id = ? AND m.folder = 'inbox' GROUP BY m.sender_address""", (account,)).fetchall())
+    picked = []
+    for sender, ids in sorted(by_sender.items(), key=lambda kv: -len(kv[1])):
+        need = min(per_sender - done.get(sender, 0), len(ids))
+        if need <= 0:
+            continue
+        picked += [ids[round(i * (len(ids) - 1) / max(need - 1, 1))] for i in range(need)] if need > 1 else [ids[-1]]
+    return list(dict.fromkeys(picked))
 
 
 def cmd_classify(args) -> int:
@@ -176,13 +196,15 @@ def cmd_classify(args) -> int:
         plan = policy.build_plan(conn, account, senders)
         # Only messages no rule or built-in policy has decided are sent to Jev.
         todo = [item.message_id for item in plan if item.reason == "尚未分類（待 Jev／確認）"]
-        if args.sample:
+        if args.per_sender:
+            todo = _spread_per_sender(conn, account, plan, args.per_sender)
+        elif args.sample:
             import random
             # Spread a trial across the mailbox instead of taking only the oldest mail.
             todo = random.Random(args.seed).sample(todo, min(args.limit, len(todo)))
         todo = todo[:args.limit]
         print(f"Sending {len(todo)} messages to Jev (sender, subject, signals, redacted excerpt).")
-        provider = outlook_provider()
+        provider = registry.reader(args.provider)
         with TypeSafeClient() as client:
             counts = jev.classify_pending(conn, account, todo, client, provider.get_body_text)
         queued = review.enqueue(conn, account, policy.build_plan(conn, account, senders))
@@ -230,19 +252,19 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
 
     login = commands.add_parser("login", help="Sign in to a mailbox in this terminal")
-    login.add_argument("provider", choices=["outlook"])
+    login.add_argument("provider", choices=list(registry.PROVIDERS))
     login.add_argument("--write", action="store_true", help="also grant permission to move mail")
     login.set_defaults(func=cmd_login)
 
     sync = commands.add_parser("sync", help="Index Inbox and Sent Items metadata (read-only)")
-    sync.add_argument("provider", choices=["outlook"])
+    sync.add_argument("provider", choices=list(registry.PROVIDERS))
     sync.add_argument("--full", action="store_true", help="re-read everything instead of only newer mail")
     sync.set_defaults(func=cmd_sync)
 
     for name, func, text in (("stats", cmd_stats, "Show index totals"),
                              ("groups", cmd_groups, "List the largest sender groups")):
         sub = commands.add_parser(name, help=text)
-        sub.add_argument("provider", choices=["outlook"])
+        sub.add_argument("provider", choices=list(registry.PROVIDERS))
         sub.set_defaults(func=func)
         if name == "groups":
             sub.add_argument("--limit", type=int, default=50)
@@ -250,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
 
     review = commands.add_parser("protection-review",
                                  help="List or decide protected senders that look like newsletters")
-    review.add_argument("provider", choices=["outlook"])
+    review.add_argument("provider", choices=list(registry.PROVIDERS))
     review.add_argument("decision", nargs="?", default="list", choices=["list", "keep", "unprotect", "not-client"])
     review.add_argument("address", nargs="?", default="")
     review.add_argument("--json", action="store_true")
@@ -277,9 +299,13 @@ def main(argv: list[str] | None = None) -> int:
     for name, func, text in (("plan", cmd_plan, "Preview what would happen (no changes)"),
                              ("apply", cmd_apply, "Carry out the plan; needs --yes"),):
         sub = commands.add_parser(name, help=text)
-        sub.add_argument("provider", choices=["outlook"])
+        sub.add_argument("provider", choices=list(registry.PROVIDERS))
         sub.add_argument("--groups", type=int, default=0, help="limit to the N largest sender groups")
         sub.add_argument("--sender", action="append", help="limit to this sender (repeatable)")
+        sub.add_argument("--finish", action="store_true",
+                         help="file everything no rule decided into 封存 and skip the 30-day wait")
+        sub.add_argument("--keep-newest", type=int, default=100,
+                         help="with --finish, leave this many newest messages in the Inbox")
         sub.set_defaults(func=func)
         if name == "plan":
             sub.add_argument("--json", action="store_true")
@@ -287,15 +313,17 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--yes", action="store_true")
 
     classify = commands.add_parser("classify", help="Send unclassified messages to Jev (no mail is changed)")
-    classify.add_argument("provider", choices=["outlook"])
+    classify.add_argument("provider", choices=list(registry.PROVIDERS))
     classify.add_argument("--limit", type=int, default=50)
     classify.add_argument("--groups", type=int, default=0)
     classify.add_argument("--sample", action="store_true", help="pick a random sample instead of the oldest mail")
     classify.add_argument("--seed", type=int, default=0)
+    classify.add_argument("--per-sender", type=int, default=0,
+                          help="classify up to N spread-out messages per sender; the verdict then covers the sender")
     classify.set_defaults(func=cmd_classify)
 
     reviews = commands.add_parser("review", help="List or decide messages Jev was unsure about")
-    reviews.add_argument("provider", choices=["outlook"])
+    reviews.add_argument("provider", choices=list(registry.PROVIDERS))
     review_commands = reviews.add_subparsers(dest="review_command")
     review_list = review_commands.add_parser("list")
     review_list.add_argument("--limit", type=int, default=50)
@@ -309,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("mcp", help="Run the MCP server on stdio").set_defaults(func=cmd_mcp)
 
     undo = commands.add_parser("undo", help="Move a batch's messages back to the Inbox")
-    undo.add_argument("provider", choices=["outlook"])
+    undo.add_argument("provider", choices=list(registry.PROVIDERS))
     undo.add_argument("batch")
     undo.set_defaults(func=cmd_undo)
 

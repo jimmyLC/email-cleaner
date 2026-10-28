@@ -187,7 +187,9 @@ class OutlookProvider:
 
 WRITE_SCOPES = ["Mail.ReadWrite", "Contacts.Read", "User.Read"]
 _ALLOWED_POST = re.compile(r"^/me/(?:messages/[^/]+/move|mailFolders)$")
-_RESERVED_FOLDERS = {"inbox", "deleteditems", "junkemail", "sentitems", "drafts", "outbox", "archive"}
+_RESERVED_FOLDERS = {"inbox", "deleteditems", "junkemail", "sentitems", "drafts", "outbox"}
+# Outlook's own Archive folder (shown as 封存 in zh-TW). Filing here never creates a folder.
+_ARCHIVE_NAMES = {"archive", "封存"}
 
 
 class OutlookWriter:
@@ -243,6 +245,9 @@ class OutlookWriter:
             return self._folders[key]
         if not display_name.strip() or display_name.casefold() in _RESERVED_FOLDERS:
             raise ValueError(f"Not a usable archive folder: {display_name!r}")
+        if display_name.casefold() in _ARCHIVE_NAMES:
+            self._folders[key] = self.folder_id("archive")
+            return self._folders[key]
         escaped = display_name.replace("'", "''")
         found = self._call("GET", "/me/mailFolders",
                            {"$filter": f"displayName eq '{escaped}'", "$select": "id,displayName"}).get("value", [])

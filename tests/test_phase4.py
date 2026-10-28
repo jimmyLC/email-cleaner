@@ -56,18 +56,21 @@ class Phase4Tests(unittest.TestCase):
 
     def test_disposition_thresholds_and_bulk_evidence(self):
         C = jev.Classification
-        self.assertEqual(jev.disposition(C("newsletter", .9, "bulk_or_automated", .95), True)[0], "trash")
-        self.assertEqual(jev.disposition(C("newsletter", .9, "bulk_or_automated", .95), False)[0], "review")
-        self.assertEqual(jev.disposition(C("newsletter", .8, "bulk_or_automated", .95), True)[0], "review")
+        self.assertEqual(jev.disposition(C("promotion", .9, "bulk_or_automated", .95), True)[0], "trash")
+        self.assertEqual(jev.disposition(C("promotion", .9, "bulk_or_automated", .95), False)[0], "review")
+        self.assertEqual(jev.disposition(C("promotion", .8, "bulk_or_automated", .95), True)[0], "review")
+        # Newsletters are filed under 電子報, never deleted.
+        self.assertEqual(jev.disposition(C("newsletter", .9, "bulk_or_automated", .95), True)[:2], ("archive", "電子報"))
+        self.assertEqual(jev.disposition(C("notification", .9, "bulk_or_automated", .95), True)[0], "keep")
         self.assertEqual(jev.disposition(C("promotion", .9, "bulk_or_automated", .89), True)[0], "review")
-        self.assertEqual(jev.disposition(C("receipt", .9, "bulk_or_automated", .99), True)[:2], ("archive", "收據"))
+        self.assertEqual(jev.disposition(C("receipt", .9, "bulk_or_automated", .99), True)[:2], ("keep", None))
         self.assertEqual(jev.disposition(C("personal", .9, "private_or_unclear", .9), False)[:2], ("archive", "個人"))
         self.assertEqual(jev.disposition(C("phishing", .99, "bulk_or_automated", .99), True)[0], "review")
         self.assertEqual(jev.disposition(C("account", .9, "bulk_or_automated", .99), False)[0], "trash_if_old")
         self.assertEqual(jev.disposition(C("account", .7, "bulk_or_automated", .99), False)[0], "review")
 
     def test_classified_messages_flow_into_plan_and_review_queue(self):
-        jev.classify_pending(self.conn, "outlook:acct", ["inbox1", "inbox2"], jev_client("newsletter"), lambda _id: "")
+        jev.classify_pending(self.conn, "outlook:acct", ["inbox1", "inbox2"], jev_client("promotion"), lambda _id: "")
         # Already classified messages are not sent again.
         again = jev_client("newsletter")
         self.assertEqual(jev.classify_pending(self.conn, "outlook:acct", ["inbox1"], again, lambda _id: "")["skipped"], 1)
@@ -78,8 +81,36 @@ class Phase4Tests(unittest.TestCase):
         self.assertEqual(review.enqueue(self.conn, "outlook:acct", list(plan.values())), 1)
         self.assertEqual(review.enqueue(self.conn, "outlook:acct", list(plan.values())), 0)
 
+    def test_a_sender_verdict_needs_agreement_and_covers_unseen_messages(self):
+        index.sync(self.conn, Fake([msg(i, "promo@shop.example", f"Sale {i}", headers=BULK) for i in range(10, 14)]
+                                   + [msg(20, "mixed@shop.example", "A", headers=BULK), msg(21, "mixed@shop.example", "B", headers=BULK),
+                                      msg(22, "mixed@shop.example", "C", headers=BULK)]))
+        for mid in ("inbox10", "inbox11"):
+            jev.classify_pending(self.conn, "outlook:acct", [mid], jev_client("promotion"), lambda _id: "")
+        jev.classify_pending(self.conn, "outlook:acct", ["inbox20"], jev_client("promotion"), lambda _id: "")
+        jev.classify_pending(self.conn, "outlook:acct", ["inbox21"], jev_client("receipt"), lambda _id: "")
+        verdicts = jev.sender_classifications(self.conn, "outlook:acct")
+        self.assertEqual(verdicts["promo@shop.example"].category, "promotion")
+        self.assertNotIn("mixed@shop.example", verdicts)          # 1 of 2 is below the agreement bar
+        plan = {i.message_id: i for i in policy.build_plan(self.conn, "outlook:acct", now=NOW)}
+        self.assertEqual(plan["inbox13"].action, "trash")          # never classified itself, sender verdict applies
+        self.assertEqual(plan["inbox22"].reason, "尚未分類（待 Jev／確認）")   # no verdict for the mixed sender
+
+    def test_finish_files_the_rest_into_the_archive_and_keeps_the_newest(self):
+        self.conn.execute("UPDATE messages SET received_at = '2026-10-23T00:00:00Z' WHERE message_id = 'inbox3'")
+        newest = "inbox3"
+        rules.add_rule(self.conn, "address", "editor@letter.example", "archive", "user", None, "收據")
+        plan = {i.message_id: i for i in policy.build_plan(self.conn, "outlook:acct", now=NOW, finish=True, keep_newest=1)}
+        self.assertEqual(plan[newest].action, "keep")
+        others = [i for mid, i in plan.items() if mid != newest]
+        client = [i for i in others if i.sender == "boss@client.example"][0]
+        self.assertEqual((client.action, client.target_folder), ("archive", "客戶"))
+        for item in others:
+            if item is not client:
+                self.assertEqual((item.action, item.target_folder), ("archive", "封存"))
+
     def test_review_decision_can_create_a_rule(self):
-        jev.classify_pending(self.conn, "outlook:acct", ["inbox2"], jev_client("newsletter"), lambda _id: "")
+        jev.classify_pending(self.conn, "outlook:acct", ["inbox2"], jev_client("promotion"), lambda _id: "")
         review.enqueue(self.conn, "outlook:acct", policy.build_plan(self.conn, "outlook:acct", now=NOW))
         item = review.pending(self.conn, "outlook:acct")[0]
         rule_id = review.resolve(self.conn, "outlook:acct", item["id"], "trash", rule_scope="domain")
@@ -90,7 +121,7 @@ class Phase4Tests(unittest.TestCase):
             review.resolve(self.conn, "outlook:acct", item["id"], "trash")
 
     def test_reviews_decided_by_a_new_rule_are_closed(self):
-        jev.classify_pending(self.conn, "outlook:acct", ["inbox2"], jev_client("newsletter"), lambda _id: "")
+        jev.classify_pending(self.conn, "outlook:acct", ["inbox2"], jev_client("promotion"), lambda _id: "")
         review.enqueue(self.conn, "outlook:acct", policy.build_plan(self.conn, "outlook:acct", now=NOW))
         rules.add_rule(self.conn, "address", "editor@letter.example", "trash", "user")
         plan = policy.build_plan(self.conn, "outlook:acct", now=NOW)

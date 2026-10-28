@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -23,7 +24,8 @@ CATEGORIES = {
     "notification": "Automated service, social network or app notifications",
     "phishing": "Scam, phishing or impersonation attempt",
 }
-DISPOSABLE = {"newsletter", "promotion", "notification"}
+DISPOSABLE = {"promotion"}  # trashed when Jev is sure; newsletters are filed, not deleted
+AGREEMENT = 0.66  # share of a sender's sampled messages that must agree on one category
 BULK_CONFIDENCE = 0.90
 CATEGORY_CONFIDENCE = 0.85
 
@@ -119,6 +121,32 @@ def classify_pending(conn: sqlite3.Connection, account_id: str, message_ids: lis
     return {"classified": done, "skipped": skipped}
 
 
+def sender_classifications(conn: sqlite3.Connection, account_id: str) -> dict[str, Classification]:
+    """One classification per sender from the messages Jev has already seen.
+
+    A sender is only trusted when most of its sampled messages agree on a category, so a
+    sender that mixes receipts with promotions stays unsure instead of being guessed.
+    """
+    rows = conn.execute(
+        """SELECT m.sender_address, c.category, c.category_confidence, c.message_type, c.message_type_confidence
+           FROM classifications c JOIN messages m ON m.account_id = c.account_id AND m.message_id = c.message_id
+           WHERE c.account_id = ? AND m.folder = 'inbox'""", (account_id,)).fetchall()
+    by_sender: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        by_sender.setdefault(row[0], []).append(row)
+    result = {}
+    for sender, group in by_sender.items():
+        category, votes = Counter(row[1] for row in group).most_common(1)[0]
+        if votes / len(group) < AGREEMENT:
+            continue
+        agreeing = [row for row in group if row[1] == category]
+        kind = Counter(row[3] for row in agreeing).most_common(1)[0][0]
+        kinds = [row for row in agreeing if row[3] == kind]
+        result[sender] = Classification(category, sum(row[2] for row in agreeing) / len(agreeing), kind,
+                                        sum(row[4] for row in kinds) / len(kinds))
+    return result
+
+
 def disposition(result: Classification, bulk_evidence: bool) -> tuple[str, str | None, str]:
     """Map Jev's answer to (action, folder, reason). Unsure answers go to review."""
     confident_bulk = result.message_type == "bulk_or_automated" and result.message_type_confidence >= BULK_CONFIDENCE
@@ -128,8 +156,14 @@ def disposition(result: Classification, bulk_evidence: bool) -> tuple[str, str |
         if bulk_evidence:
             return "trash", None, label
         return "review", None, label + "，但缺少群發佐證"
+    if result.category == "newsletter" and sure and confident_bulk:
+        if bulk_evidence:
+            return "archive", "電子報", label
+        return "review", None, label + "，但缺少群發佐證"
+    if result.category == "notification" and sure:
+        return "keep", None, label + "，通知類"
     if result.category == "receipt" and sure:
-        return "archive", "收據", label
+        return "keep", None, label + "，訂單／收據類，尚未決定資料夾"
     if result.category == "personal" and sure and result.message_type == "private_or_unclear":
         return "archive", "個人", label
     if result.category == "account" and sure:

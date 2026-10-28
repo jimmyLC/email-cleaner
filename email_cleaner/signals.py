@@ -65,8 +65,13 @@ def header_map(meta: MessageMeta) -> dict[str, str]:
     return result
 
 
+# Gmail files mass mail into these tabs itself. "updates" is left out on purpose: it holds
+# receipts and statements, which are not junk.
+_GMAIL_BULK_TABS = {"gmail:promotions": "促銷", "gmail:social": "社群", "gmail:forums": "論壇"}
+
+
 def bulk_signals(meta: MessageMeta, headers: dict[str, str]) -> list[str]:
-    signals = []
+    signals = [f"Gmail 分類：{_GMAIL_BULK_TABS[tab]}" for tab in meta.categories if tab in _GMAIL_BULK_TABS]
     if "list-unsubscribe" in headers:
         signals.append("List-Unsubscribe 標頭")
     if "list-unsubscribe-post" in headers:

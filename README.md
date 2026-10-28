@@ -2,20 +2,24 @@
 
 A personal, self-hosted inbox cleaner for Outlook and Gmail. It learns readable rules from your confirmations, classifies the rest with TypeSafe Jev, protects client correspondence, and offers one-click unsubscribe without sending email. It runs on your own machine and is reached only over your private network.
 
-Status: phase 1 (read-only Outlook index). See [docs/DESIGN.md](docs/DESIGN.md) and [docs/PLAN.md](docs/PLAN.md).
+Status: Outlook is complete through classification and cleanup; Gmail provider is built and tested offline (live use needs your own Google OAuth client, see [docs/GMAIL_SETUP.md](docs/GMAIL_SETUP.md)). See [docs/DESIGN.md](docs/DESIGN.md) and [docs/PLAN.md](docs/PLAN.md).
 
 ## Setup
 
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e .
-cp .env.example .env   # set OUTLOOK_CLIENT_ID (and TYPESAFE_API_KEY for later phases)
+cp .env.example .env   # set OUTLOOK_CLIENT_ID and/or GMAIL_CLIENT_ID + GMAIL_CLIENT_SECRET (and TYPESAFE_API_KEY for Jev)
 chmod 600 .env
 ```
 
 The Microsoft Entra app must allow public client (device code) flows. Phase 1 requests only `Mail.Read`, `Contacts.Read` and `User.Read`, and the Graph client issues GET requests only.
 
-## Phase 1 commands (read-only)
+## Gmail
+
+Gmail uses labels instead of folders: filing adds a label and removes `INBOX`, `封存`/Archive only removes `INBOX`, trash moves to Trash (recoverable). Writing needs the `gmail.modify` scope, which cannot delete permanently or send. Every command below takes `gmail` instead of `outlook`. Setup guide: [docs/GMAIL_SETUP.md](docs/GMAIL_SETUP.md).
+
+## Read-only commands
 
 ```sh
 .venv/bin/email-cleaner login outlook          # device-code sign-in in the terminal
